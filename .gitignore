@@ -1,0 +1,9 @@
+config.json
+default_art.jpg
+output/
+temp/
+log/
+__pycache__/
+*.pyc
+.venv/
+venv/

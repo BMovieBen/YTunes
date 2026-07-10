@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>YTunes</title>
+<style>
+  :root { --bg:#14161a; --card:#1e2127; --accent:#4f8cff; --text:#e8e8e8; --muted:#8a8f98; --ok:#3ecf72; --err:#ff5c5c; }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 20px; font-size: 13px; }
+  .add-bar { display: flex; gap: 8px; margin-bottom: 24px; }
+  .add-bar input { flex: 1; padding: 10px 12px; border-radius: 6px; border: 1px solid #333; background: #0f1114; color: var(--text); }
+  button { padding: 10px 16px; border-radius: 6px; border: none; background: var(--accent); color: white; cursor: pointer; font-weight: 600; }
+  button.secondary { background: #33373f; }
+  button.small { padding: 6px 10px; font-size: 12px; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  section { margin-bottom: 32px; }
+  section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+  .card { background: var(--card); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+  .card-top { display: flex; justify-content: space-between; align-items: center; }
+  .card-title { font-weight: 600; }
+  .status { font-size: 12px; padding: 3px 8px; border-radius: 12px; background: #33373f; color: var(--muted); }
+  .status.needs_review { background: #4a3d1a; color: #e8c76a; }
+  .status.complete { background: #1a3d24; color: var(--ok); }
+  .status.error { background: #3d1a1a; color: var(--err); }
+  .candidates { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .candidate { display: flex; justify-content: space-between; align-items: center; background: #0f1114; padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+  .candidate img { width: 32px; height: 32px; border-radius: 4px; object-fit: cover; margin-right: 8px; }
+  .candidate-info { display: flex; align-items: center; }
+  .manual-form { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .manual-form input { padding: 6px 8px; border-radius: 5px; border: 1px solid #333; background: #0f1114; color: var(--text); font-size: 12px; }
+  .art-upload { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .library-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2a2d33; font-size: 13px; }
+  .empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>YTunes</h1>
+<div class="subtitle">YouTube → identified, tagged MP3s</div>
+
+<div class="add-bar">
+  <input id="url-input" placeholder="Paste a YouTube video or playlist URL...">
+  <button onclick="addUrl()">+ Add</button>
+  <button class="secondary" onclick="processQueue()">Process Queue</button>
+</div>
+
+<section>
+  <h2>Queue</h2>
+  <div id="queue-container"><div class="empty">Loading...</div></div>
+</section>
+
+<section>
+  <h2>Library</h2>
+  <div id="library-container"><div class="empty">Loading...</div></div>
+</section>
+
+<script>
+async function addUrl() {
+  const input = document.getElementById('url-input');
+  const url = input.value.trim();
+  if (!url) return;
+  input.value = '';
+  const resp = await fetch('/add', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  });
+  const data = await resp.json();
+  if (data.error) alert(data.error);
+  refreshQueue();
+}
+
+async function processQueue() {
+  await fetch('/process', {method: 'POST'});
+  refreshQueue();
+}
+
+async function refreshQueue() {
+  const resp = await fetch('/queue');
+  const tracks = await resp.json();
+  const container = document.getElementById('queue-container');
+  if (tracks.length === 0) {
+    container.innerHTML = '<div class="empty">Nothing queued yet.</div>';
+    return;
+  }
+  container.innerHTML = tracks.map(renderTrack).join('');
+}
+
+function renderTrack(t) {
+  let candidatesHtml = '';
+  if (t.status === 'needs_review') {
+    candidatesHtml = '<div class="candidates">' +
+      t.candidates.map((c, i) => `
+        <div class="candidate">
+          <div class="candidate-info">
+            ${c.art_url ? `<img src="${c.art_url}">` : ''}
+            <div>
+              <div><strong>${escapeHtml(c.title)}</strong> — ${escapeHtml(c.artist)}</div>
+              <div style="color:var(--muted)">${escapeHtml(c.album || '')} ${c.year ? '· ' + c.year : ''} · ${c.source}</div>
+            </div>
+          </div>
+          <button class="small" onclick='confirmTrack("${t.id}", ${JSON.stringify(c)})'>Use this</button>
+        </div>
+      `).join('') +
+      '</div>' +
+      renderManualForm(t.id) +
+      renderArtUpload(t.id);
+  }
+
+  return `
+    <div class="card">
+      <div class="card-top">
+        <div class="card-title">${escapeHtml(t.video_title)}</div>
+        <div class="status ${t.status}">${t.status.replace('_', ' ')}</div>
+      </div>
+      ${t.playlist_title ? `<div style="color:var(--muted); font-size:12px;">From playlist: ${escapeHtml(t.playlist_title)}</div>` : ''}
+      ${t.error_message ? `<div style="color:var(--err); font-size:12px;">${escapeHtml(t.error_message)}</div>` : ''}
+      ${candidatesHtml}
+      <div style="margin-top:8px;"><button class="small secondary" onclick='removeTrack("${t.id}")'>Remove</button></div>
+    </div>
+  `;
+}
+
+function renderManualForm(trackId) {
+  const id = trackId;
+  return `
+    <div class="manual-form" id="manual-${id}">
+      <input placeholder="Title" id="title-${id}">
+      <input placeholder="Artist" id="artist-${id}">
+      <input placeholder="Album" id="album-${id}">
+      <input placeholder="Year" id="year-${id}">
+      <input placeholder="Genre" id="genre-${id}">
+      <input placeholder="Track #" id="tracknum-${id}">
+    </div>
+    <button class="small" style="margin-top:6px;" onclick="confirmManual('${id}')">Use manual entry</button>
+  `;
+}
+
+function renderArtUpload(trackId) {
+  return `
+    <div class="art-upload">
+      Or upload custom art: <input type="file" accept="image/*" onchange="uploadArt('${trackId}', this)">
+    </div>
+  `;
+}
+
+async function confirmTrack(trackId, candidate) {
+  const resp = await fetch(`/track/${trackId}/confirm`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({selected: candidate, manual_override: false})
+  });
+  const data = await resp.json();
+  if (data.error) alert(data.error);
+  refreshQueue();
+  refreshLibrary();
+}
+
+async function confirmManual(trackId) {
+  const selected = {
+    title: document.getElementById(`title-${trackId}`).value,
+    artist: document.getElementById(`artist-${trackId}`).value,
+    album: document.getElementById(`album-${trackId}`).value,
+    year: document.getElementById(`year-${trackId}`).value,
+    genre: document.getElementById(`genre-${trackId}`).value,
+    track_number: document.getElementById(`tracknum-${trackId}`).value || null,
+    art_url: null,
+  };
+  const resp = await fetch(`/track/${trackId}/confirm`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({selected, manual_override: true})
+  });
+  const data = await resp.json();
+  if (data.error) alert(data.error);
+  refreshQueue();
+  refreshLibrary();
+}
+
+async function uploadArt(trackId, input) {
+  if (!input.files.length) return;
+  const formData = new FormData();
+  formData.append('file', input.files[0]);
+  await fetch(`/track/${trackId}/upload_art`, {method: 'POST', body: formData});
+}
+
+async function removeTrack(trackId) {
+  await fetch(`/track/${trackId}`, {method: 'DELETE'});
+  refreshQueue();
+}
+
+async function refreshLibrary() {
+  const resp = await fetch('/library');
+  const files = await resp.json();
+  const container = document.getElementById('library-container');
+  if (files.length === 0) {
+    container.innerHTML = '<div class="empty">No completed tracks yet.</div>';
+    return;
+  }
+  container.innerHTML = files.map(f => `
+    <div class="library-item">
+      <span>${escapeHtml(f)}</span>
+      <span>
+        <a href="/library/${encodeURIComponent(f)}/download"><button class="small secondary">Download</button></a>
+        <button class="small secondary" onclick='deleteLibraryFile("${f}")'>Delete</button>
+      </span>
+    </div>
+  `).join('');
+}
+
+async function deleteLibraryFile(filename) {
+  if (!confirm(`Delete ${filename}?`)) return;
+  await fetch(`/library/${encodeURIComponent(filename)}`, {method: 'DELETE'});
+  refreshLibrary();
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+refreshQueue();
+refreshLibrary();
+setInterval(refreshQueue, 4000);
+</script>
+</body>
+</html>
