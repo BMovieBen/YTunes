@@ -68,12 +68,31 @@ async function addUrl() {
   });
   const data = await resp.json();
   if (data.error) alert(data.error);
-  refreshQueue();
+  await refreshQueue();
 }
 
 async function processQueue() {
   await fetch('/process', {method: 'POST'});
-  refreshQueue();
+  pollWhileActive();
+}
+
+let pollActive = false;
+const ACTIVE_STATUSES = ['downloading', 'analyzing', 'tagging'];
+
+async function pollWhileActive() {
+  if (pollActive) return;
+  pollActive = true;
+  const step = async () => {
+    const tracks = await refreshQueue();
+    const stillActive = tracks.some(t => ACTIVE_STATUSES.includes(t.status));
+    if (stillActive) {
+      setTimeout(step, 2500);
+    } else {
+      pollActive = false;
+      refreshLibrary();
+    }
+  };
+  step();
 }
 
 async function refreshQueue() {
@@ -82,12 +101,14 @@ async function refreshQueue() {
   const container = document.getElementById('queue-container');
   if (tracks.length === 0) {
     container.innerHTML = '<div class="empty">Nothing queued yet.</div>';
-    return;
+  } else {
+    container.innerHTML = tracks.map(renderTrack).join('');
   }
-  container.innerHTML = tracks.map(renderTrack).join('');
+  return tracks;
 }
 
 function renderTrack(t) {
+  const fallback = (t.candidates || []).find(c => c.source === 'youtube') || {};
   let candidatesHtml = '';
   if (t.status === 'needs_review') {
     candidatesHtml = '<div class="candidates">' +
@@ -104,8 +125,8 @@ function renderTrack(t) {
         </div>
       `).join('') +
       '</div>' +
-      renderManualForm(t.id) +
-      renderArtUpload(t.id);
+      renderManualForm(t.id, fallback) +
+      renderArtUpload(t.id, fallback);
   }
 
   return `
@@ -122,24 +143,27 @@ function renderTrack(t) {
   `;
 }
 
-function renderManualForm(trackId) {
+function renderManualForm(trackId, fallback) {
   const id = trackId;
+  const f = fallback || {};
   return `
     <div class="manual-form" id="manual-${id}">
-      <input placeholder="Title" id="title-${id}">
-      <input placeholder="Artist" id="artist-${id}">
-      <input placeholder="Album" id="album-${id}">
-      <input placeholder="Year" id="year-${id}">
-      <input placeholder="Genre" id="genre-${id}">
-      <input placeholder="Track #" id="tracknum-${id}">
+      <input placeholder="Title" id="title-${id}" value="${escapeAttr(f.title)}">
+      <input placeholder="Artist" id="artist-${id}" value="${escapeAttr(f.artist)}">
+      <input placeholder="Album" id="album-${id}" value="${escapeAttr(f.album)}">
+      <input placeholder="Year" id="year-${id}" value="${escapeAttr(f.year)}">
+      <input placeholder="Genre" id="genre-${id}" value="${escapeAttr(f.genre)}">
+      <input placeholder="Track #" id="tracknum-${id}" value="${escapeAttr(f.track_number)}">
     </div>
-    <button class="small" style="margin-top:6px;" onclick="confirmManual('${id}')">Use manual entry</button>
+    <button class="small" style="margin-top:6px;" onclick="confirmManual('${id}', ${JSON.stringify(f.art_url || null)})">Use manual entry</button>
   `;
 }
 
-function renderArtUpload(trackId) {
+function renderArtUpload(trackId, fallback) {
+  const artUrl = fallback && fallback.art_url;
   return `
     <div class="art-upload">
+      ${artUrl ? `<div style="margin-bottom:6px;"><img src="${artUrl}" style="width:60px;height:60px;border-radius:6px;object-fit:cover;"><div style="color:var(--muted);">From the YouTube thumbnail — used automatically unless you upload or pick something else</div></div>` : ''}
       Or upload custom art: <input type="file" accept="image/*" onchange="uploadArt('${trackId}', this)">
     </div>
   `;
@@ -156,7 +180,7 @@ async function confirmTrack(trackId, candidate) {
   refreshLibrary();
 }
 
-async function confirmManual(trackId) {
+async function confirmManual(trackId, fallbackArtUrl) {
   const selected = {
     title: document.getElementById(`title-${trackId}`).value,
     artist: document.getElementById(`artist-${trackId}`).value,
@@ -164,7 +188,7 @@ async function confirmManual(trackId) {
     year: document.getElementById(`year-${trackId}`).value,
     genre: document.getElementById(`genre-${trackId}`).value,
     track_number: document.getElementById(`tracknum-${trackId}`).value || null,
-    art_url: null,
+    art_url: fallbackArtUrl || null,
   };
   const resp = await fetch(`/track/${trackId}/confirm`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -219,9 +243,17 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-refreshQueue();
+function escapeAttr(val) {
+  if (val === null || val === undefined) return '';
+  return String(val).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+refreshQueue().then(tracks => {
+  if (tracks.some(t => ACTIVE_STATUSES.includes(t.status))) {
+    pollWhileActive();
+  }
+});
 refreshLibrary();
-setInterval(refreshQueue, 4000);
 </script>
 </body>
 </html>

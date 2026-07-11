@@ -25,8 +25,10 @@ def resolve_urls(url):
         "--flat-playlist",
         "--dump-single-json",
         "--no-warnings",
-        url,
     ]
+    cmd.extend(_cookies_args())
+    cmd.extend(["--remote-components", "ejs:github"])
+    cmd.append(url)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True)
     except subprocess.CalledProcessError as e:
@@ -79,12 +81,16 @@ def download_audio(url, temp_folder, track_id):
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
-        "--ffmpeg-location", _ffmpeg_path(),
         "--no-playlist",
         "-o", out_template,
         "--no-warnings",
-        url,
     ]
+    ffmpeg_path = _ffmpeg_path()
+    if ffmpeg_path and ffmpeg_path != "ffmpeg":
+        cmd.extend(["--ffmpeg-location", ffmpeg_path])
+    cmd.extend(_cookies_args())
+    cmd.extend(["--remote-components", "ejs:github"])
+    cmd.append(url)
     log(f"Downloading audio for track {track_id} from {url}")
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=True)
@@ -103,6 +109,42 @@ def download_audio(url, temp_folder, track_id):
     return expected_path
 
 
+def get_video_metadata(url):
+    """
+    Fetch full single-video metadata (title, channel/uploader, thumbnail) via
+    yt-dlp. Used as a guaranteed fallback candidate so there's always
+    something to review/confirm even when no metadata source has a match.
+    """
+    cmd = [
+        _ytdlp_path(),
+        "--dump-single-json",
+        "--no-playlist",
+        "--no-warnings",
+    ]
+    cmd.extend(_cookies_args())
+    cmd.extend(["--remote-components", "ejs:github"])
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True)
+        data = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        log(f"Failed to fetch YouTube metadata for {url}: {e}", "error")
+        return {"title": None, "uploader": None, "thumbnail": None}
+
+    thumbnail = data.get("thumbnail")
+    if not thumbnail:
+        thumbs = data.get("thumbnails") or []
+        if thumbs:
+            thumbnail = sorted(thumbs, key=lambda t: t.get("width", 0) or 0)[-1].get("url")
+
+    return {
+        "title": data.get("title"),
+        "uploader": data.get("uploader") or data.get("channel"),
+        "thumbnail": thumbnail,
+    }
+
+
 def _ytdlp_path():
     from utils import load_config
     return load_config().get("ytdlp_path", "yt-dlp")
@@ -111,3 +153,16 @@ def _ytdlp_path():
 def _ffmpeg_path():
     from utils import load_config
     return load_config().get("ffmpeg_path", "ffmpeg")
+
+
+def _cookies_args():
+    """
+    Build the --cookies-from-browser argument if configured. YouTube's bot
+    detection frequently 403s anonymous requests; authenticating as a real
+    logged-in browser session works around this.
+    """
+    from utils import load_config
+    browser = load_config().get("cookies_from_browser", "").strip()
+    if not browser:
+        return []
+    return ["--cookies-from-browser", browser]

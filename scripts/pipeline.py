@@ -66,6 +66,22 @@ def _process_single_track(track, cfg):
     qm.update_track(track_id, status="analyzing")
     candidates = _gather_candidates(track_id, audio_path, track["video_title"], cfg)
 
+    # Always add a YouTube-sourced fallback (title + channel + thumbnail),
+    # so there's a usable starting point even when no metadata source matches.
+    yt_meta = fetch_youtube.get_video_metadata(track["source_url"])
+    fallback = {
+        "source": "youtube",
+        "title": yt_meta.get("title") or track["video_title"],
+        "artist": yt_meta.get("uploader") or "Unknown Artist",
+        "album": "",
+        "year": "",
+        "genre": "",
+        "track_number": None,
+        "art_url": yt_meta.get("thumbnail"),
+        "confidence": 0.1,
+    }
+    candidates.append(fallback)
+
     qm.update_track(track_id, candidates=candidates, status="needs_review")
     log(f"Track {track_id} ready for review with {len(candidates)} candidate(s)")
 

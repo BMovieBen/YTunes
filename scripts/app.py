@@ -12,9 +12,12 @@ from werkzeug.utils import secure_filename
 import queue_manager as qm
 import pipeline
 import metadata_lookup
-from utils import load_config, log, safe_filename
+from utils import BASE_DIR, load_config, log, safe_filename
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+)
 cfg = load_config()
 
 qm.cleanup_stuck_tracks()
