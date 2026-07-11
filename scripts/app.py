@@ -11,7 +11,6 @@ from werkzeug.utils import secure_filename
 
 import queue_manager as qm
 import pipeline
-import metadata_lookup
 from utils import BASE_DIR, load_config, log, safe_filename
 
 app = Flask(
@@ -54,27 +53,31 @@ def process():
     return jsonify({"status": "started"})
 
 
-@app.route("/track/<track_id>/search", methods=["POST"])
-def track_search(track_id):
-    """Manual search: user types a query, we return fresh candidates."""
-    query = (request.json or {}).get("query", "").strip()
-    if not query:
-        return jsonify({"error": "No query provided"}), 400
-    results = metadata_lookup.search_all(query, limit_per_source=5)
-    for r in results:
-        r["confidence"] = 0.5
-    return jsonify({"candidates": results})
+@app.route("/track/<track_id>/more_matches", methods=["POST"])
+def more_matches(track_id):
+    """On-demand deeper search: more fingerprint guesses, more results per
+    source, optionally combined with a user-typed query. Merges into and
+    persists the track's candidate list."""
+    data = request.json or {}
+    custom_query = (data.get("query") or "").strip() or None
+    try:
+        candidates = pipeline.find_more_matches(track_id, custom_query)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log(f"more_matches failed for track {track_id}: {e}", "error")
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"candidates": candidates})
 
 
 @app.route("/track/<track_id>/confirm", methods=["POST"])
 def track_confirm(track_id):
     data = request.json or {}
     selected = data.get("selected")
-    manual_override = bool(data.get("manual_override", False))
     if not selected or not selected.get("title") or not selected.get("artist"):
         return jsonify({"error": "Title and artist are required"}), 400
     try:
-        output_path = pipeline.confirm_track(track_id, selected, manual_override)
+        output_path = pipeline.confirm_track(track_id, selected)
     except Exception as e:
         log(f"Failed to confirm track {track_id}: {e}", "error")
         return jsonify({"error": str(e)}), 400

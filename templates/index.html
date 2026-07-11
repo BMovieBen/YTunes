@@ -2,61 +2,321 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230d0f12'/><text x='50' y='72' font-family='sans-serif' font-size='42' font-weight='bold' fill='%23ff3b3b' text-anchor='middle'>YT</text></svg>">
 <title>YTunes</title>
 <style>
-  :root { --bg:#14161a; --card:#1e2127; --accent:#4f8cff; --text:#e8e8e8; --muted:#8a8f98; --ok:#3ecf72; --err:#ff5c5c; }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, sans-serif; margin: 0; padding: 24px; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  .subtitle { color: var(--muted); margin-bottom: 20px; font-size: 13px; }
-  .add-bar { display: flex; gap: 8px; margin-bottom: 24px; }
-  .add-bar input { flex: 1; padding: 10px 12px; border-radius: 6px; border: 1px solid #333; background: #0f1114; color: var(--text); }
-  button { padding: 10px 16px; border-radius: 6px; border: none; background: var(--accent); color: white; cursor: pointer; font-weight: 600; }
-  button.secondary { background: #33373f; }
-  button.small { padding: 6px 10px; font-size: 12px; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  section { margin-bottom: 32px; }
-  section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
-  .card { background: var(--card); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
-  .card-top { display: flex; justify-content: space-between; align-items: center; }
-  .card-title { font-weight: 600; }
-  .status { font-size: 12px; padding: 3px 8px; border-radius: 12px; background: #33373f; color: var(--muted); }
-  .status.needs_review { background: #4a3d1a; color: #e8c76a; }
-  .status.complete { background: #1a3d24; color: var(--ok); }
-  .status.error { background: #3d1a1a; color: var(--err); }
-  .candidates { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
-  .candidate { display: flex; justify-content: space-between; align-items: center; background: #0f1114; padding: 8px 10px; border-radius: 6px; font-size: 13px; }
-  .candidate img { width: 32px; height: 32px; border-radius: 4px; object-fit: cover; margin-right: 8px; }
-  .candidate-info { display: flex; align-items: center; }
-  .manual-form { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .manual-form input { padding: 6px 8px; border-radius: 5px; border: 1px solid #333; background: #0f1114; color: var(--text); font-size: 12px; }
-  .art-upload { margin-top: 8px; font-size: 12px; color: var(--muted); }
-  .library-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #2a2d33; font-size: 13px; }
-  .empty { color: var(--muted); font-size: 13px; }
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap');
+
+  :root {
+    --bg:        #0d0f12;
+    --surface:   #161920;
+    --surface2:  #1e2229;
+    --border:    #2a2f3a;
+    --accent:    #ff3b3b;
+    --accent-dim:#c0292f;
+    --accent-soft: rgba(255,59,59,0.12);
+    --chrome-1:  #f2f3f5;
+    --chrome-2:  #9aa0aa;
+    --chrome-3:  #5b606a;
+    --danger:    #ff6b6b;
+    --warn:      #fbbf24;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --radius:    12px;
+    --mono:      'DM Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    padding: 0 0 80px;
+  }
+
+  header {
+    padding: 24px 20px 4px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .brand {
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    background: linear-gradient(180deg, var(--chrome-1) 0%, var(--chrome-3) 45%, var(--chrome-1) 55%, var(--chrome-2) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .brand span { color: var(--accent); -webkit-text-fill-color: var(--accent); }
+
+  .subtitle { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  main { max-width: 720px; margin: 0 auto; padding: 20px; }
+
+  .input-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 24px;
+    display: flex;
+    gap: 8px;
+  }
+
+  input[type="text"] {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 15px;
+    padding: 10px 14px;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="text"]::placeholder { color: var(--muted); }
+
+  button { cursor: pointer; font-family: var(--sans); border: none; border-radius: 8px; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-primary {
+    background: linear-gradient(180deg, #ff5a5a, #e33131 55%, #c31d1d);
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.3px;
+    padding: 11px 18px;
+    border: 1px solid #7a1414;
+    box-shadow: 0 2px 10px rgba(255,59,59,0.25);
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+
+  .btn-chrome {
+    background: linear-gradient(180deg, #f4f5f7 0%, #c7cbd1 45%, #eef0f2 55%, #8a8f98 100%);
+    color: #14161a;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.2px;
+    padding: 8px 14px;
+    border: 1px solid #6f747c;
+  }
+  .btn-chrome:hover { filter: brightness(1.05); }
+  .btn-chrome.small { padding: 6px 10px; font-size: 11px; }
+
+  .btn-ghost {
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--chrome-2); }
+
+  section { margin-bottom: 28px; }
+  .queue-header {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .empty { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+
+  .queue-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    padding: 14px 16px;
+    transition: border-color 0.2s;
+  }
+  .queue-card.status-needs_review { border-left-color: var(--accent); }
+  .queue-card.status-complete { border-left-color: #3ecf72; }
+  .queue-card.status-error { border-left-color: var(--danger); }
+  .queue-card.status-downloading, .queue-card.status-analyzing, .queue-card.status-tagging { border-left-color: var(--chrome-2); }
+
+  .card-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .card-header-title { font-weight: 700; font-size: 14px; }
+  .card-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+  .status-badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 4px 9px;
+    border-radius: 20px;
+    background: var(--surface2);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .status-badge.needs_review { background: var(--accent-soft); color: var(--accent); }
+  .status-badge.complete { background: rgba(62,207,114,0.12); color: #3ecf72; }
+  .status-badge.error { background: rgba(255,107,107,0.12); color: var(--danger); }
+
+  .card-error {
+    margin-top: 8px;
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--danger);
+    background: rgba(255,107,107,0.08);
+    border: 1px solid rgba(255,107,107,0.25);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+
+  /* Compare row: original vs best match */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  @media (max-width: 480px) {
+    .compare-grid { grid-template-columns: 1fr; }
+  }
+
+  .compare-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .compare-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .compare-body { display: flex; gap: 10px; align-items: center; }
+  .compare-art {
+    width: 52px; height: 52px; border-radius: 6px; object-fit: cover;
+    background: var(--surface); border: 1px solid var(--border); flex-shrink: 0;
+  }
+  .compare-info { min-width: 0; }
+  .compare-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compare-meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .confidence-badge {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 20px;
+    display: inline-block;
+    width: fit-content;
+  }
+  .confidence-high { background: rgba(255,59,59,0.18); color: #ff6b6b; border: 1px solid rgba(255,59,59,0.4); }
+  .confidence-mid  { background: rgba(154,160,170,0.15); color: var(--chrome-1); border: 1px solid rgba(154,160,170,0.3); }
+  .confidence-low  { background: var(--surface); color: var(--muted); border: 1px dashed var(--border); }
+
+  .other-matches { margin-top: 10px; }
+  .other-match-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; margin-top: 6px; gap: 8px;
+  }
+  .other-match-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .other-match-info img { width: 30px; height: 30px; border-radius: 5px; object-fit: cover; flex-shrink: 0; }
+  .other-match-text { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .other-match-text .sub { color: var(--muted); font-size: 10.5px; }
+
+  .more-matches-row {
+    display: flex; gap: 8px; margin-top: 12px;
+  }
+  .more-matches-row input { flex: 1; }
+
+  .edit-form {
+    margin-top: 16px;
+    display: flex;
+    gap: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+  }
+  .art-block { flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .art-preview {
+    width: 80px; height: 80px; border-radius: 8px; object-fit: cover;
+    background: var(--surface2); border: 1px solid var(--border);
+  }
+  .art-upload-label {
+    font-size: 10px; text-align: center; cursor: pointer;
+  }
+
+  .fields-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .fields-grid input {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .fields-grid label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 3px;
+  }
+  .field-wrap.span2 { grid-column: span 2; }
+
+  .confirm-row { margin-top: 14px; display: flex; justify-content: space-between; align-items: center; }
+
+  .library-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 4px; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .library-item:last-child { border-bottom: none; }
 </style>
 </head>
 <body>
 
-<h1>YTunes</h1>
-<div class="subtitle">YouTube → identified, tagged MP3s</div>
+<header>
+  <div class="brand">YT<span>unes</span></div>
+  <div class="subtitle">YouTube &rarr; identified, tagged MP3s</div>
+</header>
 
-<div class="add-bar">
-  <input id="url-input" placeholder="Paste a YouTube video or playlist URL...">
-  <button onclick="addUrl()">+ Add</button>
-  <button class="secondary" onclick="processQueue()">Process Queue</button>
-</div>
+<main>
+  <div class="input-section">
+    <input type="text" id="url-input" placeholder="Paste a YouTube video or playlist URL...">
+    <button class="btn-chrome" onclick="addUrl()">+ Add</button>
+    <button class="btn-primary" onclick="processQueue()">Process Queue</button>
+  </div>
 
-<section>
-  <h2>Queue</h2>
-  <div id="queue-container"><div class="empty">Loading...</div></div>
-</section>
+  <section>
+    <div class="queue-header">Queue</div>
+    <div id="queue-container"><div class="empty">Loading...</div></div>
+  </section>
 
-<section>
-  <h2>Library</h2>
-  <div id="library-container"><div class="empty">Loading...</div></div>
-</section>
+  <section>
+    <div class="queue-header">Library</div>
+    <div id="library-container"><div class="empty">Loading...</div></div>
+  </section>
+</main>
 
 <script>
+let latestTracks = {};   // id -> full track object from server
+let formCache = {};      // id -> {title, artist, album, year, genre, track_number, art_url, isCustomArt}
+
+// ---------- Queue / Add / Process ----------
+
 async function addUrl() {
   const input = document.getElementById('url-input');
   const url = input.value.trim();
@@ -98,6 +358,9 @@ async function pollWhileActive() {
 async function refreshQueue() {
   const resp = await fetch('/queue');
   const tracks = await resp.json();
+  latestTracks = {};
+  tracks.forEach(t => { latestTracks[t.id] = t; });
+
   const container = document.getElementById('queue-container');
   if (tracks.length === 0) {
     container.innerHTML = '<div class="empty">Nothing queued yet.</div>';
@@ -107,97 +370,240 @@ async function refreshQueue() {
   return tracks;
 }
 
+// ---------- Rendering ----------
+
 function renderTrack(t) {
-  const fallback = (t.candidates || []).find(c => c.source === 'youtube') || {};
-  let candidatesHtml = '';
+  const badgeLabel = t.status.replace(/_/g, ' ');
+  let body = '';
+
   if (t.status === 'needs_review') {
-    candidatesHtml = '<div class="candidates">' +
-      t.candidates.map((c, i) => `
-        <div class="candidate">
-          <div class="candidate-info">
-            ${c.art_url ? `<img src="${c.art_url}">` : ''}
-            <div>
-              <div><strong>${escapeHtml(c.title)}</strong> — ${escapeHtml(c.artist)}</div>
-              <div style="color:var(--muted)">${escapeHtml(c.album || '')} ${c.year ? '· ' + c.year : ''} · ${c.source}</div>
-            </div>
-          </div>
-          <button class="small" onclick='confirmTrack("${t.id}", ${JSON.stringify(c)})'>Use this</button>
-        </div>
-      `).join('') +
-      '</div>' +
-      renderManualForm(t.id, fallback) +
-      renderArtUpload(t.id, fallback);
+    body = renderReviewBody(t);
   }
 
   return `
-    <div class="card">
-      <div class="card-top">
-        <div class="card-title">${escapeHtml(t.video_title)}</div>
-        <div class="status ${t.status}">${t.status.replace('_', ' ')}</div>
+    <div class="queue-card status-${t.status}" data-track-id="${t.id}">
+      <div class="card-header">
+        <div>
+          <div class="card-header-title">${escapeHtml(t.video_title)}</div>
+          ${t.playlist_title ? `<div class="card-sub">From playlist: ${escapeHtml(t.playlist_title)}</div>` : ''}
+        </div>
+        <div class="status-badge ${t.status}">${badgeLabel}</div>
       </div>
-      ${t.playlist_title ? `<div style="color:var(--muted); font-size:12px;">From playlist: ${escapeHtml(t.playlist_title)}</div>` : ''}
-      ${t.error_message ? `<div style="color:var(--err); font-size:12px;">${escapeHtml(t.error_message)}</div>` : ''}
-      ${candidatesHtml}
-      <div style="margin-top:8px;"><button class="small secondary" onclick='removeTrack("${t.id}")'>Remove</button></div>
+      ${t.error_message ? `<div class="card-error">${escapeHtml(t.error_message)}</div>` : ''}
+      ${body}
+      <div class="confirm-row" style="margin-top:10px;">
+        <button class="btn-ghost" onclick='removeTrack("${t.id}")'>Remove</button>
+      </div>
     </div>
   `;
 }
 
-function renderManualForm(trackId, fallback) {
-  const id = trackId;
-  const f = fallback || {};
-  return `
-    <div class="manual-form" id="manual-${id}">
-      <input placeholder="Title" id="title-${id}" value="${escapeAttr(f.title)}">
-      <input placeholder="Artist" id="artist-${id}" value="${escapeAttr(f.artist)}">
-      <input placeholder="Album" id="album-${id}" value="${escapeAttr(f.album)}">
-      <input placeholder="Year" id="year-${id}" value="${escapeAttr(f.year)}">
-      <input placeholder="Genre" id="genre-${id}" value="${escapeAttr(f.genre)}">
-      <input placeholder="Track #" id="tracknum-${id}" value="${escapeAttr(f.track_number)}">
-    </div>
-    <button class="small" style="margin-top:6px;" onclick="confirmManual('${id}', ${JSON.stringify(f.art_url || null)})">Use manual entry</button>
-  `;
-}
+function renderReviewBody(t) {
+  const ref = t.youtube_reference || {};
+  const candidates = t.candidates || [];
+  const top = candidates[0] || null;
+  const rest = candidates.slice(1);
 
-function renderArtUpload(trackId, fallback) {
-  const artUrl = fallback && fallback.art_url;
-  return `
-    <div class="art-upload">
-      ${artUrl ? `<div style="margin-bottom:6px;"><img src="${artUrl}" style="width:60px;height:60px;border-radius:6px;object-fit:cover;"><div style="color:var(--muted);">From the YouTube thumbnail — used automatically unless you upload or pick something else</div></div>` : ''}
-      Or upload custom art: <input type="file" accept="image/*" onchange="uploadArt('${trackId}', this)">
-    </div>
-  `;
-}
-
-async function confirmTrack(trackId, candidate) {
-  const resp = await fetch(`/track/${trackId}/confirm`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({selected: candidate, manual_override: false})
-  });
-  const data = await resp.json();
-  if (data.error) alert(data.error);
-  refreshQueue();
-  refreshLibrary();
-}
-
-async function confirmManual(trackId, fallbackArtUrl) {
-  const selected = {
-    title: document.getElementById(`title-${trackId}`).value,
-    artist: document.getElementById(`artist-${trackId}`).value,
-    album: document.getElementById(`album-${trackId}`).value,
-    year: document.getElementById(`year-${trackId}`).value,
-    genre: document.getElementById(`genre-${trackId}`).value,
-    track_number: document.getElementById(`tracknum-${trackId}`).value || null,
-    art_url: fallbackArtUrl || null,
+  const cache = formCache[t.id];
+  const basis = cache || top || {
+    title: ref.title, artist: ref.artist, album: ref.album,
+    year: ref.year, genre: ref.genre, track_number: ref.track_number,
+    art_url: ref.art_url,
   };
-  const resp = await fetch(`/track/${trackId}/confirm`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({selected, manual_override: true})
-  });
-  const data = await resp.json();
-  if (data.error) alert(data.error);
-  refreshQueue();
-  refreshLibrary();
+  if (!formCache[t.id]) {
+    formCache[t.id] = { ...basis, isCustomArt: false };
+  }
+
+  return `
+    <div id="matches-${t.id}">
+      ${renderMatchesSection(t.id, ref, top, rest)}
+    </div>
+    ${renderEditForm(t.id, formCache[t.id])}
+  `;
+}
+
+function renderMatchesSection(trackId, ref, top, rest) {
+  const originalCard = `
+    <div class="compare-card">
+      <div class="compare-label">Original &middot; YouTube</div>
+      <div class="compare-body">
+        ${ref.art_url ? `<img class="compare-art" src="${ref.art_url}">` : `<div class="compare-art"></div>`}
+        <div class="compare-info">
+          <div class="compare-title" title="${escapeAttr(ref.title)}">${escapeHtml(ref.title || 'Untitled')}</div>
+          <div class="compare-meta" title="${escapeAttr(ref.artist)}">${escapeHtml(ref.artist || 'Unknown channel')}</div>
+        </div>
+      </div>
+      <button class="btn-chrome small" onclick='applyCandidate("${trackId}", ${JSON.stringify(ref)})'>Apply</button>
+    </div>
+  `;
+
+  const matchCard = top ? `
+    <div class="compare-card">
+      <div class="compare-label">Best match &middot; ${escapeHtml(top.source)}</div>
+      <div class="compare-body">
+        ${top.art_url ? `<img class="compare-art" src="${top.art_url}">` : `<div class="compare-art"></div>`}
+        <div class="compare-info">
+          <div class="compare-title" title="${escapeAttr(top.title)}">${escapeHtml(top.title)}</div>
+          <div class="compare-meta" title="${escapeAttr(top.artist)}">${escapeHtml(top.artist)}${top.album ? ' &middot; ' + escapeHtml(top.album) : ''}</div>
+        </div>
+      </div>
+      ${confidenceBadge(top.confidence)}
+      <button class="btn-chrome small" onclick='applyCandidate("${trackId}", ${JSON.stringify(top)})'>Apply</button>
+    </div>
+  ` : `
+    <div class="compare-card">
+      <div class="compare-label">Best match</div>
+      <div class="compare-body">
+        <div class="compare-art"></div>
+        <div class="compare-info">
+          <div class="compare-title" style="color:var(--muted);">No metadata match found</div>
+          <div class="compare-meta">Try "Find more matches" below</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const otherHtml = rest.length > 0 ? `
+    <div class="other-matches">
+      <div class="compare-label">Other results (${rest.length})</div>
+      ${rest.map(c => `
+        <div class="other-match-row">
+          <div class="other-match-info">
+            ${c.art_url ? `<img src="${c.art_url}">` : ''}
+            <div class="other-match-text">
+              <div>${escapeHtml(c.title)} &mdash; ${escapeHtml(c.artist)}</div>
+              <div class="sub">${escapeHtml(c.album || '')} ${c.year ? '&middot; ' + escapeHtml(c.year) : ''} &middot; ${escapeHtml(c.source)}</div>
+            </div>
+          </div>
+          ${confidenceBadge(c.confidence)}
+          <button class="btn-chrome small" onclick='applyCandidate("${trackId}", ${JSON.stringify(c)})'>Apply</button>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  return `
+    <div class="compare-grid">${originalCard}${matchCard}</div>
+    ${otherHtml}
+    <div class="more-matches-row">
+      <input type="text" id="query-${trackId}" placeholder="Search a different query (optional)">
+      <button class="btn-chrome" onclick="findMoreMatches('${trackId}', this)">Find more matches</button>
+    </div>
+  `;
+}
+
+function confidenceBadge(score) {
+  if (score === undefined || score === null) return '';
+  const pct = Math.round(score * 100);
+  let cls = 'confidence-low';
+  if (score >= 0.7) cls = 'confidence-high';
+  else if (score >= 0.4) cls = 'confidence-mid';
+  return `<span class="confidence-badge ${cls}">${pct}% match</span>`;
+}
+
+function renderEditForm(trackId, values) {
+  const v = values || {};
+  return `
+    <div class="edit-form">
+      <div class="art-block">
+        <img class="art-preview" id="art-preview-${trackId}" src="${v.art_url || ''}" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+        <label class="btn-chrome small art-upload-label">
+          Upload art
+          <input type="file" accept="image/*" style="display:none;" onchange="uploadArt('${trackId}', this)">
+        </label>
+      </div>
+      <div class="fields-grid">
+        <div class="field-wrap span2">
+          <label>Title</label>
+          <input type="text" id="title-${trackId}" value="${escapeAttr(v.title)}" oninput="cacheField('${trackId}','title',this.value)">
+        </div>
+        <div class="field-wrap span2">
+          <label>Artist</label>
+          <input type="text" id="artist-${trackId}" value="${escapeAttr(v.artist)}" oninput="cacheField('${trackId}','artist',this.value)">
+        </div>
+        <div class="field-wrap">
+          <label>Album</label>
+          <input type="text" id="album-${trackId}" value="${escapeAttr(v.album)}" oninput="cacheField('${trackId}','album',this.value)">
+        </div>
+        <div class="field-wrap">
+          <label>Year</label>
+          <input type="text" id="year-${trackId}" value="${escapeAttr(v.year)}" oninput="cacheField('${trackId}','year',this.value)">
+        </div>
+        <div class="field-wrap">
+          <label>Genre</label>
+          <input type="text" id="genre-${trackId}" value="${escapeAttr(v.genre)}" oninput="cacheField('${trackId}','genre',this.value)">
+        </div>
+        <div class="field-wrap">
+          <label>Track #</label>
+          <input type="text" id="tracknum-${trackId}" value="${escapeAttr(v.track_number)}" oninput="cacheField('${trackId}','track_number',this.value)">
+        </div>
+      </div>
+    </div>
+    <div class="confirm-row">
+      <span></span>
+      <button class="btn-primary" onclick="confirmTrack('${trackId}')">Confirm &amp; Tag</button>
+    </div>
+  `;
+}
+
+// ---------- Field / candidate interactions ----------
+
+function cacheField(trackId, field, value) {
+  if (!formCache[trackId]) formCache[trackId] = {};
+  formCache[trackId][field] = value;
+}
+
+function applyCandidate(trackId, candidate) {
+  formCache[trackId] = {
+    title: candidate.title || '',
+    artist: candidate.artist || '',
+    album: candidate.album || '',
+    year: candidate.year || '',
+    genre: candidate.genre || '',
+    track_number: candidate.track_number || '',
+    art_url: candidate.art_url || '',
+    isCustomArt: false,
+  };
+  const f = formCache[trackId];
+  setIfExists(`title-${trackId}`, f.title);
+  setIfExists(`artist-${trackId}`, f.artist);
+  setIfExists(`album-${trackId}`, f.album);
+  setIfExists(`year-${trackId}`, f.year);
+  setIfExists(`genre-${trackId}`, f.genre);
+  setIfExists(`tracknum-${trackId}`, f.track_number);
+  const preview = document.getElementById(`art-preview-${trackId}`);
+  if (preview) preview.src = f.art_url || '';
+}
+
+function setIfExists(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value;
+}
+
+async function findMoreMatches(trackId, btn) {
+  const queryInput = document.getElementById(`query-${trackId}`);
+  const query = queryInput ? queryInput.value.trim() : '';
+  btn.disabled = true;
+  btn.textContent = 'Searching...';
+  try {
+    const resp = await fetch(`/track/${trackId}/more_matches`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query})
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    if (latestTracks[trackId]) {
+      latestTracks[trackId].candidates = data.candidates;
+      const ref = latestTracks[trackId].youtube_reference || {};
+      const top = data.candidates[0] || null;
+      const rest = data.candidates.slice(1);
+      const container = document.getElementById(`matches-${trackId}`);
+      if (container) container.innerHTML = renderMatchesSection(trackId, ref, top, rest);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Find more matches';
+  }
 }
 
 async function uploadArt(trackId, input) {
@@ -205,12 +611,48 @@ async function uploadArt(trackId, input) {
   const formData = new FormData();
   formData.append('file', input.files[0]);
   await fetch(`/track/${trackId}/upload_art`, {method: 'POST', body: formData});
+
+  if (!formCache[trackId]) formCache[trackId] = {};
+  formCache[trackId].isCustomArt = true;
+  const objectUrl = URL.createObjectURL(input.files[0]);
+  formCache[trackId].art_url = objectUrl;
+  const preview = document.getElementById(`art-preview-${trackId}`);
+  if (preview) preview.src = objectUrl;
+}
+
+async function confirmTrack(trackId) {
+  const selected = {
+    title: valOf(`title-${trackId}`),
+    artist: valOf(`artist-${trackId}`),
+    album: valOf(`album-${trackId}`),
+    year: valOf(`year-${trackId}`),
+    genre: valOf(`genre-${trackId}`),
+    track_number: valOf(`tracknum-${trackId}`) || null,
+    art_url: (formCache[trackId] && !formCache[trackId].isCustomArt) ? formCache[trackId].art_url : null,
+  };
+  const resp = await fetch(`/track/${trackId}/confirm`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({selected})
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  delete formCache[trackId];
+  await refreshQueue();
+  refreshLibrary();
+}
+
+function valOf(id) {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
 }
 
 async function removeTrack(trackId) {
   await fetch(`/track/${trackId}`, {method: 'DELETE'});
+  delete formCache[trackId];
   refreshQueue();
 }
+
+// ---------- Library ----------
 
 async function refreshLibrary() {
   const resp = await fetch('/library');
@@ -224,8 +666,8 @@ async function refreshLibrary() {
     <div class="library-item">
       <span>${escapeHtml(f)}</span>
       <span>
-        <a href="/library/${encodeURIComponent(f)}/download"><button class="small secondary">Download</button></a>
-        <button class="small secondary" onclick='deleteLibraryFile("${f}")'>Delete</button>
+        <a href="/library/${encodeURIComponent(f)}/download"><button class="btn-chrome small">Download</button></a>
+        <button class="btn-ghost" onclick='deleteLibraryFile("${f}")'>Delete</button>
       </span>
     </div>
   `).join('');
@@ -237,6 +679,8 @@ async function deleteLibraryFile(filename) {
   refreshLibrary();
 }
 
+// ---------- Utilities ----------
+
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str || '';
@@ -247,6 +691,8 @@ function escapeAttr(val) {
   if (val === null || val === undefined) return '';
   return String(val).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
+
+// ---------- Init ----------
 
 refreshQueue().then(tracks => {
   if (tracks.some(t => ACTIVE_STATUSES.includes(t.status))) {

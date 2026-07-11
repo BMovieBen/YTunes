@@ -3,8 +3,11 @@ pipeline.py - Orchestrates the YTunes processing pipeline:
   1. Resolve a URL (video or playlist) into queue entries
   2. Download audio for a queued track
   3. Extract a clip and fingerprint/identify it via AcoustID
-  4. Search iTunes/MusicBrainz/Discogs (fallback order) for metadata candidates
-  5. Once the user confirms a match (or types one manually), tag and move the file
+  4. Run a light initial metadata lookup (top pick per source) so review can
+     start quickly without hammering every source up front
+  5. On demand ("Find more matches"), run a broader search across more
+     fingerprint guesses and more results per source
+  6. Once the user confirms metadata (edited or as-is), tag and move the file
 
 Mirrors Article2Pod's pipeline.py structure: explicit "Generate/Process" trigger
 rather than fully automatic background processing, so the user stays in control.
@@ -35,9 +38,9 @@ def add_url(url):
 
 def process_pending():
     """
-    Process every 'queued' track: download -> fingerprint -> search candidates.
-    Runs in a background thread so the web UI stays responsive. Only one
-    processing run happens at a time.
+    Process every 'queued' track: download -> fingerprint -> light metadata
+    lookup. Runs in a background thread so the web UI stays responsive. Only
+    one processing run happens at a time.
     """
     if not _processing_lock.acquire(blocking=False):
         log("Processing already in progress; ignoring duplicate trigger")
@@ -64,12 +67,25 @@ def _process_single_track(track, cfg):
     qm.update_track(track_id, audio_path=audio_path)
 
     qm.update_track(track_id, status="analyzing")
-    candidates = _gather_candidates(track_id, audio_path, track["video_title"], cfg)
 
-    # Always add a YouTube-sourced fallback (title + channel + thumbnail),
-    # so there's a usable starting point even when no metadata source matches.
+    fp_matches = _fingerprint_track(track_id, audio_path, cfg)
+
+    # Light initial lookup: one query, top-1 per source (at most 3 candidates
+    # total) so review can start immediately instead of waiting on an
+    # exhaustive multi-query sweep across every source.
+    primary_query = _best_query(fp_matches, track["video_title"])
+    candidates = []
+    if primary_query:
+        candidates = metadata_lookup.search_all(primary_query, limit_per_source=1)
+        for r in candidates:
+            r["confidence"] = _confidence_for(r, fp_matches)
+        candidates.sort(key=lambda c: c["confidence"], reverse=True)
+
+    # The YouTube video's own title/channel/thumbnail — always available as
+    # a reference point, shown side-by-side with the best match rather than
+    # folded into the scored candidate list.
     yt_meta = fetch_youtube.get_video_metadata(track["source_url"])
-    fallback = {
+    youtube_reference = {
         "source": "youtube",
         "title": yt_meta.get("title") or track["video_title"],
         "artist": yt_meta.get("uploader") or "Unknown Artist",
@@ -78,15 +94,62 @@ def _process_single_track(track, cfg):
         "genre": "",
         "track_number": None,
         "art_url": yt_meta.get("thumbnail"),
-        "confidence": 0.1,
     }
-    candidates.append(fallback)
 
-    qm.update_track(track_id, candidates=candidates, status="needs_review")
-    log(f"Track {track_id} ready for review with {len(candidates)} candidate(s)")
+    qm.update_track(
+        track_id,
+        candidates=candidates,
+        youtube_reference=youtube_reference,
+        fp_matches=fp_matches,
+        status="needs_review",
+    )
+    log(f"Track {track_id} ready for review with {len(candidates)} initial candidate(s)")
 
 
-def _gather_candidates(track_id, audio_path, video_title, cfg):
+def find_more_matches(track_id, custom_query=None):
+    """
+    On-demand broader search, triggered by the user clicking "Find more
+    matches" (optionally with their own search text). Searches more queries
+    (remaining fingerprint guesses + the raw YouTube title) and more results
+    per source, merges with whatever candidates already exist, and persists
+    the combined, deduped, re-sorted list.
+    """
+    track = qm.get_track(track_id)
+    if not track:
+        raise ValueError(f"Track {track_id} not found")
+
+    fp_matches = track.get("fp_matches") or []
+    queries = []
+    if custom_query:
+        queries.append(custom_query)
+    for m in fp_matches[:3]:
+        q = f"{m['artist']} {m['title']}".strip()
+        if q and q not in queries:
+            queries.append(q)
+    if track.get("video_title") and track["video_title"] not in queries:
+        queries.append(track["video_title"])
+
+    existing = track.get("candidates") or []
+    seen = {_candidate_key(c) for c in existing}
+
+    new_candidates = []
+    for query in queries:
+        for r in metadata_lookup.search_all(query, limit_per_source=3):
+            key = _candidate_key(r)
+            if key in seen:
+                continue
+            seen.add(key)
+            r["confidence"] = _confidence_for(r, fp_matches)
+            new_candidates.append(r)
+
+    combined = existing + new_candidates
+    combined.sort(key=lambda c: c["confidence"], reverse=True)
+    qm.update_track(track_id, candidates=combined)
+    log(f"Track {track_id}: found {len(new_candidates)} additional candidate(s)")
+    return combined
+
+
+def _fingerprint_track(track_id, audio_path, cfg):
     clip_path = os.path.join(cfg["temp_folder"], f"{track_id}_clip.mp3")
     fp_matches = []
     try:
@@ -102,42 +165,38 @@ def _gather_candidates(track_id, audio_path, video_title, cfg):
     finally:
         if os.path.exists(clip_path):
             os.remove(clip_path)
-
-    # Build search queries: fingerprint guesses first (higher trust), then the
-    # raw YouTube title as a fallback so the user always has *something* to pick from.
-    queries = []
-    for match in fp_matches[:3]:
-        q = f"{match['artist']} {match['title']}".strip()
-        if q and q not in queries:
-            queries.append(q)
-    if video_title and video_title not in queries:
-        queries.append(video_title)
-
-    candidates = []
-    seen = set()
-    for query in queries:
-        results = metadata_lookup.search_all(query, limit_per_source=3)
-        for r in results:
-            key = (r["source"], r["title"].lower(), r["artist"].lower(), r["album"].lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            # Attach fingerprint confidence if this candidate matches a fingerprint guess
-            r["confidence"] = 0.5
-            for m in fp_matches:
-                if m["title"].lower() == r["title"].lower():
-                    r["confidence"] = m["score"]
-                    break
-            candidates.append(r)
-
-    candidates.sort(key=lambda c: c["confidence"], reverse=True)
-    return candidates
+    return fp_matches
 
 
-def confirm_track(track_id, selected_metadata, manual_override=False, custom_art_path=None):
+def _best_query(fp_matches, video_title):
+    if fp_matches:
+        top = fp_matches[0]
+        q = f"{top['artist']} {top['title']}".strip()
+        if q:
+            return q
+    return video_title
+
+
+def _confidence_for(candidate, fp_matches):
     """
-    Called once the user has picked a candidate (or typed one manually) in the UI.
-    Tags the file and moves it to the output folder.
+    Fingerprint-corroborated matches get the real acoustic match score.
+    Everything else is an unverified text-search hit, scored lower and
+    consistently so the UI can visually distinguish the two.
+    """
+    for m in fp_matches:
+        if m["title"].strip().lower() == candidate["title"].strip().lower():
+            return m["score"]
+    return 0.4
+
+
+def _candidate_key(c):
+    return (c["source"], c["title"].lower(), c["artist"].lower(), (c.get("album") or "").lower())
+
+
+def confirm_track(track_id, selected_metadata, custom_art_path=None):
+    """
+    Called once the user confirms the edit form (whatever values it holds,
+    pre-filled or edited). Tags the file and moves it to the output folder.
     """
     track = qm.get_track(track_id)
     if not track:
@@ -146,7 +205,6 @@ def confirm_track(track_id, selected_metadata, manual_override=False, custom_art
     qm.update_track(
         track_id,
         selected=selected_metadata,
-        manual_override=manual_override,
         custom_art_path=custom_art_path,
         status="tagging",
     )

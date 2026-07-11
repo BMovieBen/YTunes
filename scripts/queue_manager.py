@@ -13,7 +13,9 @@ Track schema:
   "error_message": str|None,
   "audio_path": str|None,      # downloaded full-length MP3 (temp)
   "candidates": list,          # metadata match candidates from lookup sources
-  "selected": dict|None,       # the candidate (or manual entry) the user confirmed
+  "youtube_reference": dict|None,  # video's own title/channel/thumbnail, for compare
+  "fp_matches": list,          # raw fingerprint guesses, kept for "find more matches"
+  "selected": dict|None,       # the metadata the user confirmed
   "manual_override": bool,     # True if user typed metadata instead of picking a candidate
   "custom_art_path": str|None, # user-uploaded album art, overrides candidate art
   "output_path": str|None,     # final tagged file location once complete
@@ -65,6 +67,8 @@ def add_track(source_url, video_title, playlist_title=None):
         "error_message": None,
         "audio_path": None,
         "candidates": [],
+        "youtube_reference": None,
+        "fp_matches": [],
         "selected": None,
         "manual_override": False,
         "custom_art_path": None,
