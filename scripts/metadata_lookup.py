@@ -13,7 +13,8 @@ Each candidate:
   "genre": str,
   "track_number": int|None,
   "art_url": str|None,
-  "confidence": float  # 0-1, from fingerprint score if available, else 0.5 default
+  "preview_url": str|None,  # 30s audio preview clip — only iTunes provides this
+  "confidence": float  # 0-1, from fingerprint score if available, else 0.4 default
 }
 """
 
@@ -60,6 +61,7 @@ def search_itunes(query, limit=5):
             "genre": item.get("primaryGenreName", ""),
             "track_number": item.get("trackNumber"),
             "art_url": art or None,
+            "preview_url": item.get("previewUrl") or None,
         })
     return out
 
@@ -92,6 +94,7 @@ def search_musicbrainz(query, limit=5):
             "genre": "",
             "track_number": None,
             "art_url": MUSICBRAINZ_COVERART_URL.format(mbid=mbid) if mbid else None,
+            "preview_url": None,
         })
     return out
 
@@ -129,6 +132,7 @@ def search_discogs(query, limit=5):
             "genre": ", ".join(item.get("genre", [])) if item.get("genre") else "",
             "track_number": None,
             "art_url": item.get("cover_image") or None,
+            "preview_url": None,
         })
     return out
 

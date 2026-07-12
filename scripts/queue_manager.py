@@ -1,6 +1,10 @@
 """
-queue_manager.py - Load/save/mutate the persistent YTunes queue.
-Mirrors Article2Pod's queue_manager.py so the queue survives app restarts.
+queue_manager.py - Load/save/mutate the in-session YTunes track list.
+
+Unlike Article2Pod's queue, this does NOT persist across app restarts —
+it's a single unified list of cards (in-progress and finished) that only
+lives for the current run of the app. On startup the list is wiped clean;
+there's no separate "library" of previously-downloaded files to remember.
 
 Track schema:
 {
@@ -8,15 +12,14 @@ Track schema:
   "source_url": str,          # original YouTube video URL
   "playlist_title": str|None, # set if this came from a playlist
   "video_title": str,         # raw YouTube title, used as fallback search query
-  "status": str,               # queued | downloading | analyzing | needs_review |
-                                # tagging | complete | error
+  "status": str,               # queued | fetching_info | downloading | analyzing |
+                                # needs_review | tagging | complete | error
   "error_message": str|None,
   "audio_path": str|None,      # downloaded full-length MP3 (temp)
   "candidates": list,          # metadata match candidates from lookup sources
   "youtube_reference": dict|None,  # video's own title/channel/thumbnail, for compare
   "fp_matches": list,          # raw fingerprint guesses, kept for "find more matches"
   "selected": dict|None,       # the metadata the user confirmed
-  "manual_override": bool,     # True if user typed metadata instead of picking a candidate
   "custom_art_path": str|None, # user-uploaded album art, overrides candidate art
   "output_path": str|None,     # final tagged file location once complete
   "added_at": str
@@ -70,7 +73,6 @@ def add_track(source_url, video_title, playlist_title=None):
         "youtube_reference": None,
         "fp_matches": [],
         "selected": None,
-        "manual_override": False,
         "custom_art_path": None,
         "output_path": None,
         "added_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -115,14 +117,8 @@ def list_tracks(status=None):
     return [t for t in queue["tracks"] if t["status"] == status]
 
 
-def cleanup_stuck_tracks():
-    """On startup, anything left mid-processing from a crash goes back to 'queued'."""
-    queue = load_queue()
-    changed = False
-    for t in queue["tracks"]:
-        if t["status"] in ("downloading", "analyzing", "tagging"):
-            t["status"] = "queued"
-            changed = True
-    if changed:
-        save_queue(queue)
-        log("Reset in-progress tracks to 'queued' after restart.")
+def reset_queue():
+    """Called once at app startup. The track list is session-only — nothing
+    resumes across a restart, so we start with a clean slate every time."""
+    save_queue(_empty_queue())
+    log("Track list reset for new session.")

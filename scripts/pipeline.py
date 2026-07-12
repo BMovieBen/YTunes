@@ -9,12 +9,17 @@ pipeline.py - Orchestrates the YTunes processing pipeline:
      fingerprint guesses and more results per source
   6. Once the user confirms metadata (edited or as-is), tag and move the file
 
-Mirrors Article2Pod's pipeline.py structure: explicit "Generate/Process" trigger
-rather than fully automatic background processing, so the user stays in control.
+Processing starts automatically the moment a URL is added — no manual
+"Process Queue" trigger. A single background worker thread handles the
+queue; if one's already running when new tracks are added, they're picked
+up by that same worker rather than needing a second trigger (see the
+locking note on start_background_processing for how that race is avoided).
 """
 
 import os
+import re
 import threading
+from difflib import SequenceMatcher
 
 import queue_manager as qm
 import fetch_youtube
@@ -23,56 +28,124 @@ import metadata_lookup
 import tag_mp3
 from utils import load_config, log
 
-_processing_lock = threading.Lock()
+_worker_lock = threading.Lock()   # guards _worker_running only — held briefly, never during I/O
+_worker_running = False
 
 
 def add_url(url):
-    """Resolve a URL (single video or playlist) and add each track to the queue."""
+    """Resolve a URL (single video or playlist) and add each track to the queue,
+    then immediately kick off background processing (or, if a worker is
+    already running, it will pick these up automatically — see the locking
+    note in start_background_processing)."""
     entries = fetch_youtube.resolve_urls(url)
     added = []
     for entry in entries:
         track = qm.add_track(entry["url"], entry["title"], entry.get("playlist_title"))
         added.append(track)
+    if added:
+        start_background_processing()
     return added
 
 
-def process_pending():
+def start_background_processing():
     """
-    Process every 'queued' track: download -> fingerprint -> light metadata
-    lookup. Runs in a background thread so the web UI stays responsive. Only
-    one processing run happens at a time.
+    Start the worker thread if one isn't already running. Whether a worker
+    is running is tracked by _worker_running, which is only ever read or
+    written while holding _worker_lock — and the worker's own decision to
+    stop (see _worker_loop) uses that same lock for its final check. That's
+    what prevents the race where a track gets added in the narrow window
+    between the worker deciding the queue is empty and it actually exiting:
+    that decision and this one can never happen at the same time, so a new
+    track is guaranteed to be seen by either the still-running worker or a
+    freshly spawned one — never neither.
     """
-    if not _processing_lock.acquire(blocking=False):
-        log("Processing already in progress; ignoring duplicate trigger")
-        return
+    global _worker_running
+    with _worker_lock:
+        if _worker_running:
+            log("Background worker already running; new tracks will be picked up by it")
+            return None
+        _worker_running = True
+    log("Starting background worker thread")
+    thread = threading.Thread(target=_worker_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def _worker_loop():
+    global _worker_running
+    processed_count = 0
     try:
         cfg = load_config()
-        pending = qm.list_tracks(status="queued")
-        log(f"Starting processing run for {len(pending)} queued track(s)")
-        for track in pending:
+        while True:
+            pending = qm.list_tracks(status="queued")
+            if not pending:
+                # Atomic check-and-stop: only declare "done" if nothing was
+                # added between our list_tracks() call above and grabbing
+                # the lock here. If something was, fall through and keep going.
+                with _worker_lock:
+                    pending = qm.list_tracks(status="queued")
+                    if not pending:
+                        _worker_running = False
+                        break
+                    # else: something arrived just in time — keep processing
+                    continue
+            track = pending[0]
+            log(f"Worker picked up track {track['id']}: {track.get('video_title')}")
             try:
                 _process_single_track(track, cfg)
             except Exception as e:
                 log(f"Error processing track {track['id']}: {e}", "error")
                 qm.update_track(track["id"], status="error", error_message=str(e))
-    finally:
-        _processing_lock.release()
+            processed_count += 1
+        log(f"Processing run finished ({processed_count} track(s) handled)")
+    except Exception:
+        # Anything that escapes here (including load_config() failing, or a
+        # bug in the queue-listing calls themselves) would otherwise kill
+        # this daemon thread silently. Log the full traceback so it's
+        # visible in ytunes.log even when the console window is minimized,
+        # then make sure _worker_running doesn't get stuck as True forever.
+        import traceback
+        log(f"Background worker crashed:\n{traceback.format_exc()}", "error")
+        with _worker_lock:
+            _worker_running = False
+        raise
 
 
 def _process_single_track(track, cfg):
     track_id = track["id"]
 
-    qm.update_track(track_id, status="downloading")
+    # Step 1: grab YouTube's own title/channel/thumbnail first — this is a
+    # lightweight metadata call (no download), so the card can update with
+    # real info almost immediately instead of sitting blank.
+    qm.update_track(track_id, status="fetching_info")
+    yt_meta = fetch_youtube.get_video_metadata(track["source_url"])
+    title = yt_meta.get("title") or track["video_title"]
+    is_standalone = not track.get("playlist_title")
+    youtube_reference = {
+        "source": "youtube",
+        "title": title,
+        "artist": yt_meta.get("uploader") or "Unknown Artist",
+        # Singles aren't part of an album — using the song's own title reads
+        # better than leaving it blank. Playlist tracks likely belong to
+        # the playlist's own "album" in spirit, so use its title instead.
+        "album": title if is_standalone else (track.get("playlist_title") or ""),
+        "year": yt_meta.get("year") or "",
+        "genre": "",
+        "track_number": None,
+        "art_url": yt_meta.get("thumbnail"),
+    }
+    qm.update_track(track_id, youtube_reference=youtube_reference, status="downloading")
+
+    # Step 2: download the audio.
     audio_path = fetch_youtube.download_audio(track["source_url"], cfg["temp_folder"], track_id)
     qm.update_track(track_id, audio_path=audio_path)
 
+    # Step 3: fingerprint + light initial metadata lookup (top-1 per source,
+    # at most 3 candidates total) so review can start without waiting on an
+    # exhaustive multi-query sweep across every source.
     qm.update_track(track_id, status="analyzing")
-
     fp_matches = _fingerprint_track(track_id, audio_path, cfg)
 
-    # Light initial lookup: one query, top-1 per source (at most 3 candidates
-    # total) so review can start immediately instead of waiting on an
-    # exhaustive multi-query sweep across every source.
     primary_query = _best_query(fp_matches, track["video_title"])
     candidates = []
     if primary_query:
@@ -81,25 +154,9 @@ def _process_single_track(track, cfg):
             r["confidence"] = _confidence_for(r, fp_matches)
         candidates.sort(key=lambda c: c["confidence"], reverse=True)
 
-    # The YouTube video's own title/channel/thumbnail — always available as
-    # a reference point, shown side-by-side with the best match rather than
-    # folded into the scored candidate list.
-    yt_meta = fetch_youtube.get_video_metadata(track["source_url"])
-    youtube_reference = {
-        "source": "youtube",
-        "title": yt_meta.get("title") or track["video_title"],
-        "artist": yt_meta.get("uploader") or "Unknown Artist",
-        "album": "",
-        "year": "",
-        "genre": "",
-        "track_number": None,
-        "art_url": yt_meta.get("thumbnail"),
-    }
-
     qm.update_track(
         track_id,
         candidates=candidates,
-        youtube_reference=youtube_reference,
         fp_matches=fp_matches,
         status="needs_review",
     )
@@ -160,6 +217,13 @@ def _fingerprint_track(track_id, audio_path, cfg):
             cfg.get("ffmpeg_path", "ffmpeg"),
         )
         fp_matches = fingerprint.identify(clip_path)
+        if fp_matches:
+            log(f"Track {track_id}: fingerprint identified {len(fp_matches)} candidate(s), "
+                f"top guess '{fp_matches[0]['title']}' by '{fp_matches[0]['artist']}' "
+                f"(score {fp_matches[0]['score']})")
+        else:
+            log(f"Track {track_id}: fingerprint returned no matches "
+                f"(check acoustid_api_key and fpcalc if this happens consistently)")
     except Exception as e:
         log(f"Fingerprinting failed for track {track_id}, falling back to title search: {e}", "error")
     finally:
@@ -177,16 +241,45 @@ def _best_query(fp_matches, video_title):
     return video_title
 
 
+def _normalize(s):
+    """Lowercase, strip parenthetical/bracketed annotations like '(Remastered
+    2011)' or '[Official Video]', drop punctuation, collapse whitespace —
+    enough to compare titles that mean the same thing but aren't identical
+    strings."""
+    s = (s or "").lower()
+    s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _confidence_for(candidate, fp_matches):
     """
-    Fingerprint-corroborated matches get the real acoustic match score.
-    Everything else is an unverified text-search hit, scored lower and
-    consistently so the UI can visually distinguish the two.
+    Fingerprint-corroborated matches get the real acoustic match score —
+    but "corroborated" is judged by fuzzy title/artist similarity, not exact
+    string equality, since a metadata search result's title formatting
+    (remaster tags, punctuation, etc.) is rarely identical to AcoustID's.
+    Everything else is an unverified text-search hit, scored at a flat,
+    consistently lower default so the UI can visually tell the two apart.
     """
+    if not fp_matches:
+        return 0.4
+
+    cand_title = _normalize(candidate.get("title"))
+    cand_artist = _normalize(candidate.get("artist"))
+
+    best = 0.0
     for m in fp_matches:
-        if m["title"].strip().lower() == candidate["title"].strip().lower():
-            return m["score"]
-    return 0.4
+        title_sim = SequenceMatcher(None, cand_title, _normalize(m.get("title"))).ratio()
+        if cand_artist and m.get("artist"):
+            artist_sim = SequenceMatcher(None, cand_artist, _normalize(m.get("artist"))).ratio()
+        else:
+            artist_sim = 0.5  # missing artist on one side — don't penalize or reward
+        combined = title_sim * 0.7 + artist_sim * 0.3
+        if combined >= 0.55:
+            best = max(best, m["score"])
+
+    return best if best > 0 else 0.4
 
 
 def _candidate_key(c):
@@ -213,10 +306,3 @@ def confirm_track(track_id, selected_metadata, custom_art_path=None):
     output_path = tag_mp3.tag_and_move(track)
     qm.update_track(track_id, status="complete", output_path=output_path)
     return output_path
-
-
-def start_background_processing():
-    """Kick off process_pending() in a background thread (non-blocking for Flask)."""
-    thread = threading.Thread(target=process_pending, daemon=True)
-    thread.start()
-    return thread

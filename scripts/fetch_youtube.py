@@ -111,9 +111,10 @@ def download_audio(url, temp_folder, track_id):
 
 def get_video_metadata(url):
     """
-    Fetch full single-video metadata (title, channel/uploader, thumbnail) via
-    yt-dlp. Used as a guaranteed fallback candidate so there's always
-    something to review/confirm even when no metadata source has a match.
+    Fetch full single-video metadata (title, channel/uploader, thumbnail,
+    year) via yt-dlp. Used as a guaranteed fallback candidate so there's
+    always something to review/confirm even when no metadata source has a
+    match.
     """
     cmd = [
         _ytdlp_path(),
@@ -130,7 +131,7 @@ def get_video_metadata(url):
         data = json.loads(result.stdout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         log(f"Failed to fetch YouTube metadata for {url}: {e}", "error")
-        return {"title": None, "uploader": None, "thumbnail": None}
+        return {"title": None, "uploader": None, "thumbnail": None, "year": None}
 
     thumbnail = data.get("thumbnail")
     if not thumbnail:
@@ -138,10 +139,19 @@ def get_video_metadata(url):
         if thumbs:
             thumbnail = sorted(thumbs, key=lambda t: t.get("width", 0) or 0)[-1].get("url")
 
+    # Prefer an explicit release year (more accurate for music uploads) and
+    # fall back to the video's upload date (format YYYYMMDD) otherwise.
+    year = None
+    if data.get("release_year"):
+        year = str(data["release_year"])
+    elif data.get("upload_date"):
+        year = data["upload_date"][:4]
+
     return {
         "title": data.get("title"),
         "uploader": data.get("uploader") or data.get("channel"),
         "thumbnail": thumbnail,
+        "year": year,
     }
 
 

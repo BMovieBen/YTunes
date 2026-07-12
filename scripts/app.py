@@ -1,17 +1,19 @@
 """
-app.py - Flask routes for YTunes. Mirrors Article2Pod's app.py structure:
-a queue-based web UI for adding URLs, reviewing metadata matches, and
-browsing the finished library.
+app.py - Flask routes for YTunes: a single unified list of track cards,
+session-only (nothing persists across an app restart). Mirrors Article2Pod's
+overall structure but without a separate "library" concept — finished
+tracks just stay in the same list as "complete" cards until removed or the
+app restarts.
 """
 
 import os
 
-from flask import Flask, render_template, request, jsonify, send_file, abort
+from flask import Flask, render_template, request, jsonify, send_file, redirect, abort
 from werkzeug.utils import secure_filename
 
 import queue_manager as qm
 import pipeline
-from utils import BASE_DIR, load_config, log, safe_filename
+from utils import BASE_DIR, load_config, log
 
 app = Flask(
     __name__,
@@ -19,14 +21,14 @@ app = Flask(
 )
 cfg = load_config()
 
-qm.cleanup_stuck_tracks()
+qm.reset_queue()
 
 
 @app.route("/")
 def index():
     tracks = qm.list_tracks()
-    library = _list_library()
-    return render_template("index.html", tracks=tracks, library=library)
+    threshold = cfg.get("auto_match_confidence_threshold", 0.9)
+    return render_template("index.html", tracks=tracks, auto_match_threshold=threshold)
 
 
 @app.route("/add", methods=["POST"])
@@ -45,12 +47,6 @@ def add():
 @app.route("/queue")
 def queue_status():
     return jsonify(qm.list_tracks())
-
-
-@app.route("/process", methods=["POST"])
-def process():
-    pipeline.start_background_processing()
-    return jsonify({"status": "started"})
 
 
 @app.route("/track/<track_id>/more_matches", methods=["POST"])
@@ -99,43 +95,50 @@ def upload_art(track_id):
     file.save(dest_path)
 
     qm.update_track(track_id, custom_art_path=dest_path)
-    return jsonify({"status": "ok", "custom_art_path": dest_path})
+    return jsonify({"status": "ok"})
+
+
+@app.route("/track/<track_id>/art")
+def track_art(track_id):
+    """Serve album art for a card: uploaded custom art takes priority; else
+    redirect to whatever external art URL was selected/matched."""
+    track = qm.get_track(track_id)
+    if not track:
+        abort(404)
+    if track.get("custom_art_path") and os.path.exists(track["custom_art_path"]):
+        return send_file(track["custom_art_path"])
+    selected = track.get("selected") or {}
+    if selected.get("art_url"):
+        return redirect(selected["art_url"])
+    ref = track.get("youtube_reference") or {}
+    if ref.get("art_url"):
+        return redirect(ref["art_url"])
+    abort(404)
+
+
+@app.route("/track/<track_id>/download")
+def track_download(track_id):
+    track = qm.get_track(track_id)
+    if not track or not track.get("output_path") or not os.path.exists(track["output_path"]):
+        abort(404)
+    return send_file(track["output_path"], as_attachment=True)
 
 
 @app.route("/track/<track_id>", methods=["DELETE"])
 def remove_track(track_id):
+    """Removing a card also deletes any file it produced — there's no
+    separate library to keep it around in, so nothing should be left behind."""
+    track = qm.get_track(track_id)
+    if track:
+        for path_key in ("output_path", "audio_path", "custom_art_path"):
+            path = track.get(path_key)
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    log(f"Failed to delete {path}: {e}", "error")
     removed = qm.remove_track(track_id)
     return jsonify({"removed": removed})
-
-
-@app.route("/library")
-def library():
-    return jsonify(_list_library())
-
-
-@app.route("/library/<path:filename>/download")
-def library_download(filename):
-    path = os.path.join(cfg["output_folder"], filename)
-    if not os.path.exists(path):
-        abort(404)
-    return send_file(path, as_attachment=True)
-
-
-@app.route("/library/<path:filename>", methods=["DELETE"])
-def library_delete(filename):
-    path = os.path.join(cfg["output_folder"], filename)
-    if not os.path.exists(path):
-        abort(404)
-    os.remove(path)
-    return jsonify({"removed": True})
-
-
-def _list_library():
-    files = []
-    for name in sorted(os.listdir(cfg["output_folder"])):
-        if name.lower().endswith(".mp3"):
-            files.append(name)
-    return files
 
 
 if __name__ == "__main__":
