@@ -207,28 +207,54 @@ def find_more_matches(track_id, custom_query=None):
 
 
 def _fingerprint_track(track_id, audio_path, cfg):
-    clip_path = os.path.join(cfg["temp_folder"], f"{track_id}_clip.mp3")
+    """
+    Try fingerprinting a few different windows of the track before giving
+    up. AcoustID's match quality can vary a lot section-to-section within
+    the very same recording — their crowd-sourced database tends to have
+    denser fingerprint coverage over commonly-clipped regions (intros,
+    hooks) than over less-frequently-submitted stretches. A single fixed
+    offset is a bit of a gamble; trying a couple of alternate windows first
+    is cheap compared to falling back to an unverified text-search guess.
+    """
+    base_offset = cfg.get("clip_offset_seconds", 10)
+    duration = cfg.get("clip_duration_seconds", 40)
+    ffmpeg_path = cfg.get("ffmpeg_path", "ffmpeg")
+
+    # Configured window first, then a couple of alternates further into and
+    # near the start of the track. Dedupe in case the configured offset
+    # already happens to equal one of the fallbacks.
+    attempts = []
+    for offset in (base_offset, base_offset + 60, 5):
+        if offset >= 0 and offset not in attempts:
+            attempts.append(offset)
+
     fp_matches = []
-    try:
-        fingerprint.extract_clip(
-            audio_path, clip_path,
-            cfg.get("clip_offset_seconds", 20),
-            cfg.get("clip_duration_seconds", 25),
-            cfg.get("ffmpeg_path", "ffmpeg"),
-        )
-        fp_matches = fingerprint.identify(clip_path)
+    for i, offset in enumerate(attempts):
+        clip_path = os.path.join(cfg["temp_folder"], f"{track_id}_clip.mp3")
+        try:
+            fingerprint.extract_clip(audio_path, clip_path, offset, duration, ffmpeg_path)
+            fp_matches = fingerprint.identify(clip_path)
+        except Exception as e:
+            log(f"Fingerprinting attempt at offset {offset}s failed for track {track_id}: {e}", "error")
+            fp_matches = []
+        finally:
+            if cfg.get("debug_keep_clips", False):
+                if os.path.exists(clip_path):
+                    log(f"debug_keep_clips is on — kept fingerprinting clip at {clip_path}")
+            elif os.path.exists(clip_path):
+                os.remove(clip_path)
+
         if fp_matches:
-            log(f"Track {track_id}: fingerprint identified {len(fp_matches)} candidate(s), "
+            log(f"Track {track_id}: fingerprint succeeded at offset {offset}s (attempt {i + 1}/{len(attempts)}), "
                 f"top guess '{fp_matches[0]['title']}' by '{fp_matches[0]['artist']}' "
                 f"(score {fp_matches[0]['score']})")
+            break
+        elif i < len(attempts) - 1:
+            log(f"Track {track_id}: no match at offset {offset}s, trying another window")
         else:
-            log(f"Track {track_id}: fingerprint returned no matches "
+            log(f"Track {track_id}: fingerprint returned no matches after trying offsets {attempts} "
                 f"(check acoustid_api_key and fpcalc if this happens consistently)")
-    except Exception as e:
-        log(f"Fingerprinting failed for track {track_id}, falling back to title search: {e}", "error")
-    finally:
-        if os.path.exists(clip_path):
-            os.remove(clip_path)
+
     return fp_matches
 
 

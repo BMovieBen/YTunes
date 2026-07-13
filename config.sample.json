@@ -11,14 +11,15 @@
   "fpcalc_path": "fpcalc",
   "cookies_from_browser": "",
 
-  "clip_offset_seconds": 20,
-  "clip_duration_seconds": 25,
+  "clip_offset_seconds": 10,
+  "clip_duration_seconds": 40,
 
   "acoustid_api_key": "YOUR_ACOUSTID_API_KEY",
   "discogs_token": "YOUR_DISCOGS_PERSONAL_ACCESS_TOKEN",
 
   "metadata_source_order": ["itunes", "musicbrainz", "discogs"],
   "auto_match_confidence_threshold": 0.9,
+  "debug_keep_clips": false,
 
   "user_agent": "YTunes/1.0 (personal use; contact: your_email@example.com)"
 }
