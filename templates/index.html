@@ -41,7 +41,7 @@
     font-size: 15px;
   }
 
-  header { padding: 24px 20px 4px; max-width: 720px; margin: 0 auto; }
+  header { padding: 24px 20px 4px; max-width: min(960px, 94vw); margin: 0 auto; }
 
   .brand {
     font-size: 28px;
@@ -56,7 +56,7 @@
 
   .subtitle { color: var(--muted); font-size: 14px; margin-top: 3px; }
 
-  main { max-width: 720px; margin: 0 auto; padding: 20px; }
+  main { max-width: min(960px, 94vw); margin: 0 auto; padding: 20px; }
 
   .input-section {
     background: var(--surface);
@@ -131,7 +131,7 @@
   .queue-card.status-needs_review { border-left-color: var(--accent); }
   .queue-card.status-complete { border-left-color: #3ecf72; }
   .queue-card.status-error { border-left-color: var(--danger); }
-  .queue-card.status-queued, .queue-card.status-fetching_info,
+  .queue-card.status-queued, .queue-card.status-resolving, .queue-card.status-fetching_info,
   .queue-card.status-downloading, .queue-card.status-analyzing,
   .queue-card.status-tagging { border-left-color: var(--chrome-2); }
 
@@ -200,15 +200,20 @@
 
   .confidence-badge {
     font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 700;
-    padding: 3px 9px;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     border-radius: var(--radius-sm);
-    display: inline-block;
+    padding: 5px 10px 4px;
+    line-height: 1.05;
+    min-width: 46px;
     white-space: nowrap;
   }
-  .confidence-high { background: rgba(255,59,59,0.18); color: #ff6b6b; border: 1px solid rgba(255,59,59,0.4); }
-  .confidence-mid  { background: var(--gray-soft); color: var(--chrome-1); border: 1px solid rgba(154,160,170,0.3); }
+  .confidence-pct { font-size: 16px; font-weight: 800; }
+  .confidence-label { font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.85; margin-top: 1px; }
+  .confidence-high { background: var(--accent); color: #fff; border: 1px solid var(--accent); font-weight: 800; }
+  .confidence-mid  { background: var(--chrome-2); color: #14161a; border: 1px solid var(--chrome-2); font-weight: 800; }
   .confidence-low  { background: var(--surface); color: var(--muted); border: 1px dashed var(--border); }
 
   .more-matches-row { display: flex; gap: 8px; }
@@ -294,6 +299,7 @@
 
 <script>
 const AUTO_MATCH_THRESHOLD = {{ auto_match_threshold }};
+const FINGERPRINT_MAX_SECONDS = {{ fingerprint_max_seconds }};
 
 let latestTracks = {};   // id -> full track object from server
 let formCache = {};      // id -> {title, artist, album, year, genre, track_number, art_url, isCustomArt}
@@ -316,14 +322,21 @@ async function addUrl() {
 }
 
 let pollActive = false;
-const ACTIVE_STATUSES = ['queued', 'fetching_info', 'downloading', 'analyzing', 'tagging'];
+// Keep polling while anything is still moving toward needs_review/error —
+// includes "queued" since a track sitting there is about to be picked up.
+const POLL_ACTIVE_STATUSES = ['resolving', 'queued', 'fetching_info', 'downloading', 'analyzing', 'tagging'];
+// Narrower set: a background worker is actively doing I/O for these right
+// now, so deleting isn't allowed (mirrors queue_manager.ACTIVE_STATUSES
+// server-side — this is just the client-side guard for a responsive UI,
+// the server enforces it independently too).
+const NON_DELETABLE_STATUSES = ['resolving', 'fetching_info', 'downloading', 'analyzing', 'tagging'];
 
 async function pollWhileActive() {
   if (pollActive) return;
   pollActive = true;
   const step = async () => {
     const tracks = await refreshQueue();
-    const stillActive = tracks.some(t => ACTIVE_STATUSES.includes(t.status));
+    const stillActive = tracks.some(t => POLL_ACTIVE_STATUSES.includes(t.status));
     if (stillActive) {
       setTimeout(step, 2000);
     } else {
@@ -356,8 +369,6 @@ function renderTrack(t) {
 
   if (t.status === 'needs_review') {
     body = renderReviewBody(t);
-  } else if (t.status === 'complete') {
-    body = renderCompleteBody(t);
   } else if (t.youtube_reference) {
     body = renderProgressBody(t);
   }
@@ -365,9 +376,12 @@ function renderTrack(t) {
   let rightButton = '<span></span>';
   if (t.status === 'needs_review') {
     rightButton = `<button class="btn" onclick="confirmTrack('${t.id}')"><i class="fa-solid fa-tag"></i> Confirm &amp; Tag</button>`;
-  } else if (t.status === 'complete') {
-    rightButton = `<a href="/track/${t.id}/download"><button class="btn gray icon-only" title="Download"><i class="fa-solid fa-download"></i></button></a>`;
   }
+
+  const canDelete = !NON_DELETABLE_STATUSES.includes(t.status);
+  const removeButton = canDelete
+    ? `<button class="btn gray small icon-only" onclick='removeTrack("${t.id}")' title="Remove"><i class="fa-solid fa-trash"></i></button>`
+    : `<button class="btn gray small icon-only" disabled title="Can't remove while ${escapeAttr(badgeLabel)}"><i class="fa-solid fa-trash"></i></button>`;
 
   return `
     <div class="queue-card status-${t.status}" data-track-id="${t.id}">
@@ -381,7 +395,7 @@ function renderTrack(t) {
       ${t.error_message ? `<div class="card-error">${escapeHtml(t.error_message)}</div>` : ''}
       ${body}
       <div class="confirm-row" style="margin-top:12px;">
-        <button class="btn gray small icon-only" onclick='removeTrack("${t.id}")' title="Remove"><i class="fa-solid fa-trash"></i></button>
+        ${removeButton}
         ${rightButton}
       </div>
     </div>
@@ -406,29 +420,15 @@ function renderProgressBody(t) {
   `;
 }
 
-function renderCompleteBody(t) {
-  const s = t.selected || {};
-  return `
-    <div class="review-stack">
-      <div class="info-card">
-        <div class="info-label"><i class="fa-solid fa-check"></i> Tagged</div>
-        <div class="info-body">
-          <img class="info-art" src="/track/${t.id}/art" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
-          <div class="info-text">
-            <div class="info-title" title="${escapeAttr(s.title)}">${escapeHtml(s.title || '')}</div>
-            <div class="info-meta" title="${escapeAttr(s.artist)}">${escapeHtml(s.artist || '')}${s.album ? ' &middot; ' + escapeHtml(s.album) : ''}</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
+let revealedMatches = {}; // trackId -> bool, true once "Find more" has been clicked
 
 function renderReviewBody(t) {
   const ref = t.youtube_reference || {};
   const candidates = t.candidates || [];
   const top = candidates[0] || null;
-  const rest = candidates.slice(1);
+  // Only show anything beyond the top match once the user has explicitly
+  // asked for more — even if the initial lookup already turned up extras.
+  const rest = revealedMatches[t.id] ? candidates.slice(1) : [];
 
   if (!formCache[t.id]) {
     // Auto-fill: a confident match (>= threshold) wins; otherwise fall back
@@ -461,6 +461,7 @@ function renderMatchesSection(trackId, ref, top, rest) {
           <div class="info-meta" title="${escapeAttr(ref.artist)}">${escapeHtml(ref.artist || 'Unknown channel')}</div>
         </div>
         <div class="info-actions">
+          <button class="btn gray icon-only" onclick='togglePreview("/track/${trackId}/sample", this, FINGERPRINT_MAX_SECONDS)' title="Play the ${FINGERPRINT_MAX_SECONDS}s sample used for fingerprinting"><i class="fa-solid fa-play"></i></button>
           <button class="btn gray icon-only" onclick='applyCandidate("${trackId}", ${JSON.stringify(ref)})' title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
         </div>
       </div>
@@ -529,8 +530,8 @@ function renderMatchesSection(trackId, ref, top, rest) {
     <div class="review-stack">
       ${originalCard}
       ${matchCard}
-      ${moreRow}
       ${otherHtml}
+      ${moreRow}
     </div>
   `;
 }
@@ -541,7 +542,7 @@ function confidenceBadge(score) {
   let cls = 'confidence-low';
   if (score >= 0.7) cls = 'confidence-high';
   else if (score >= 0.4) cls = 'confidence-mid';
-  return `<span class="confidence-badge ${cls}">${pct}%</span>`;
+  return `<span class="confidence-badge ${cls}"><span class="confidence-pct">${pct}%</span><span class="confidence-label">match</span></span>`;
 }
 
 function renderEditForm(trackId, values) {
@@ -600,29 +601,40 @@ function cacheField(trackId, field, value) {
 let previewAudio = null;
 let previewButton = null;
 
-function togglePreview(url, btn) {
+function togglePreview(url, btn, maxSeconds) {
   // Clicking the currently-playing sample's button again stops it.
   if (previewAudio && previewButton === btn) {
-    previewAudio.pause();
-    resetPreviewButton(btn);
-    previewAudio = null;
-    previewButton = null;
+    stopPreview();
     return;
   }
   // Switching to a different sample: stop whatever was playing first.
   if (previewAudio) {
-    previewAudio.pause();
-    resetPreviewButton(previewButton);
+    stopPreview();
   }
   previewAudio = new Audio(url);
   previewButton = btn;
   btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
-  previewAudio.play().catch(() => resetPreviewButton(btn));
-  previewAudio.onended = () => {
-    resetPreviewButton(btn);
-    previewAudio = null;
-    previewButton = null;
-  };
+  previewAudio.play().catch(() => stopPreview());
+  previewAudio.onended = stopPreview;
+  if (maxSeconds) {
+    // The Original card plays the full downloaded file rather than a
+    // pre-trimmed clip (there isn't one — we fingerprint the full file
+    // directly), so cut playback off at the same point fingerprinting did.
+    previewAudio.ontimeupdate = () => {
+      if (previewAudio && previewAudio.currentTime >= maxSeconds) {
+        stopPreview();
+      }
+    };
+  }
+}
+
+function stopPreview() {
+  if (previewAudio) {
+    previewAudio.pause();
+  }
+  resetPreviewButton(previewButton);
+  previewAudio = null;
+  previewButton = null;
 }
 
 function resetPreviewButton(btn) {
@@ -670,6 +682,7 @@ async function findMoreMatches(trackId, btn) {
     });
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }
+    revealedMatches[trackId] = true;
     if (latestTracks[trackId]) {
       latestTracks[trackId].candidates = data.candidates;
       const ref = latestTracks[trackId].youtube_reference || {};
@@ -716,6 +729,7 @@ async function confirmTrack(trackId) {
   const data = await resp.json();
   if (data.error) { alert(data.error); return; }
   delete formCache[trackId];
+  delete revealedMatches[trackId];
   await refreshQueue();
 }
 
@@ -728,6 +742,7 @@ async function removeTrack(trackId) {
   if (!confirm('Remove this track? If it was already downloaded or tagged, that file will be deleted too.')) return;
   await fetch(`/track/${trackId}`, {method: 'DELETE'});
   delete formCache[trackId];
+  delete revealedMatches[trackId];
   refreshQueue();
 }
 
@@ -747,7 +762,7 @@ function escapeAttr(val) {
 // ---------- Init ----------
 
 refreshQueue().then(tracks => {
-  if (tracks.some(t => ACTIVE_STATUSES.includes(t.status))) {
+  if (tracks.some(t => POLL_ACTIVE_STATUSES.includes(t.status))) {
     pollWhileActive();
   }
 });

@@ -1,14 +1,14 @@
 """
 app.py - Flask routes for YTunes: a single unified list of track cards,
-session-only (nothing persists across an app restart). Mirrors Article2Pod's
-overall structure but without a separate "library" concept — finished
-tracks just stay in the same list as "complete" cards until removed or the
-app restarts.
+persisted across app restarts. There's no separate "library" — once a
+track is confirmed & tagged, its file lives in the configured output
+folder and the card is removed entirely rather than lingering as
+"complete" (see pipeline.confirm_track).
 """
 
 import os
 
-from flask import Flask, render_template, request, jsonify, send_file, redirect, abort
+from flask import Flask, render_template, request, jsonify, send_file, abort
 from werkzeug.utils import secure_filename
 
 import queue_manager as qm
@@ -21,14 +21,22 @@ app = Flask(
 )
 cfg = load_config()
 
-qm.reset_queue()
+qm.cleanup_stuck_tracks()
+if qm.list_tracks(status="resolving") or qm.list_tracks(status="queued"):
+    pipeline.start_background_processing()
 
 
 @app.route("/")
 def index():
     tracks = qm.list_tracks()
     threshold = cfg.get("auto_match_confidence_threshold", 0.9)
-    return render_template("index.html", tracks=tracks, auto_match_threshold=threshold)
+    fingerprint_max_seconds = cfg.get("fingerprint_max_seconds", 60)
+    return render_template(
+        "index.html",
+        tracks=tracks,
+        auto_match_threshold=threshold,
+        fingerprint_max_seconds=fingerprint_max_seconds,
+    )
 
 
 @app.route("/add", methods=["POST"])
@@ -77,7 +85,8 @@ def track_confirm(track_id):
     except Exception as e:
         log(f"Failed to confirm track {track_id}: {e}", "error")
         return jsonify({"error": str(e)}), 400
-    return jsonify({"status": "complete", "output_path": output_path})
+    # No "complete" status to report back — the card is already gone.
+    return jsonify({"status": "removed", "output_path": output_path})
 
 
 @app.route("/track/<track_id>/upload_art", methods=["POST"])
@@ -98,45 +107,37 @@ def upload_art(track_id):
     return jsonify({"status": "ok"})
 
 
-@app.route("/track/<track_id>/art")
-def track_art(track_id):
-    """Serve album art for a card: uploaded custom art takes priority; else
-    redirect to whatever external art URL was selected/matched."""
+@app.route("/track/<track_id>/sample")
+def track_sample(track_id):
+    """Serve the downloaded audio so the Original (YouTube) card can play a
+    sample. Playback is capped client-side at fingerprint_max_seconds, so
+    what the user hears is exactly the portion that was actually sent for
+    fingerprinting — no separate trimmed file to manage server-side."""
     track = qm.get_track(track_id)
-    if not track:
+    if not track or not track.get("audio_path") or not os.path.exists(track["audio_path"]):
         abort(404)
-    if track.get("custom_art_path") and os.path.exists(track["custom_art_path"]):
-        return send_file(track["custom_art_path"])
-    selected = track.get("selected") or {}
-    if selected.get("art_url"):
-        return redirect(selected["art_url"])
-    ref = track.get("youtube_reference") or {}
-    if ref.get("art_url"):
-        return redirect(ref["art_url"])
-    abort(404)
-
-
-@app.route("/track/<track_id>/download")
-def track_download(track_id):
-    track = qm.get_track(track_id)
-    if not track or not track.get("output_path") or not os.path.exists(track["output_path"]):
-        abort(404)
-    return send_file(track["output_path"], as_attachment=True)
+    return send_file(track["audio_path"], mimetype="audio/mpeg")
 
 
 @app.route("/track/<track_id>", methods=["DELETE"])
 def remove_track(track_id):
-    """Removing a card also deletes any file it produced — there's no
-    separate library to keep it around in, so nothing should be left behind."""
+    """Removing a card also deletes any file it produced. Not allowed while
+    a track is actively being worked on (downloading/analyzing/tagging/
+    resolving) — only pending work, a paused review, or a failed attempt
+    can be removed."""
     track = qm.get_track(track_id)
-    if track:
-        for path_key in ("output_path", "audio_path", "custom_art_path"):
-            path = track.get(path_key)
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError as e:
-                    log(f"Failed to delete {path}: {e}", "error")
+    if not track:
+        return jsonify({"error": "Track not found"}), 404
+    if not qm.is_deletable(track):
+        return jsonify({"error": f"Can't remove a track while it's {track['status']}"}), 409
+
+    for path_key in ("output_path", "audio_path", "custom_art_path"):
+        path = track.get(path_key)
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as e:
+                log(f"Failed to delete {path}: {e}", "error")
     removed = qm.remove_track(track_id)
     return jsonify({"removed": removed})
 

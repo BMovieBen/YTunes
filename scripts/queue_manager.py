@@ -1,19 +1,27 @@
 """
-queue_manager.py - Load/save/mutate the in-session YTunes track list.
+queue_manager.py - Load/save/mutate the persistent YTunes track list.
 
-Unlike Article2Pod's queue, this does NOT persist across app restarts —
-it's a single unified list of cards (in-progress and finished) that only
-lives for the current run of the app. On startup the list is wiped clean;
-there's no separate "library" of previously-downloaded files to remember.
+The list persists across app restarts in log/queue.json — a single unified
+list of cards (in-progress and finished-but-not-yet-confirmed). There's no
+separate "library": once a track is confirmed & tagged, its file lives in
+the configured output folder and the card is removed entirely (see
+pipeline.confirm_track) rather than lingering in a "complete" state.
 
 Track schema:
 {
   "id": str,
-  "source_url": str,          # original YouTube video URL
+  "source_url": str,          # YouTube URL. Initially the raw URL as typed,
+                                # since a placeholder is added before resolving.
   "playlist_title": str|None, # set if this came from a playlist
-  "video_title": str,         # raw YouTube title, used as fallback search query
-  "status": str,               # queued | fetching_info | downloading | analyzing |
-                                # needs_review | tagging | complete | error
+  "video_title": str,         # display title. Initially just the raw URL
+                                # (so a card shows up immediately on add),
+                                # replaced with the real title once resolved.
+  "resolved": bool,           # False until resolve_urls() has run for this
+                                # entry — worker resolves before doing anything else
+  "status": str,               # resolving | queued | fetching_info | downloading |
+                                # analyzing | needs_review | tagging | error
+                                # (no "complete" — confirmed tracks are removed, not
+                                # transitioned)
   "error_message": str|None,
   "audio_path": str|None,      # downloaded full-length MP3 (temp)
   "candidates": list,          # metadata match candidates from lookup sources
@@ -21,7 +29,8 @@ Track schema:
   "fp_matches": list,          # raw fingerprint guesses, kept for "find more matches"
   "selected": dict|None,       # the metadata the user confirmed
   "custom_art_path": str|None, # user-uploaded album art, overrides candidate art
-  "output_path": str|None,     # final tagged file location once complete
+  "output_path": str|None,     # final tagged file location (set only transiently
+                                # during tag_and_move; the track is removed right after)
   "added_at": str
 }
 """
@@ -35,6 +44,12 @@ from utils import BASE_DIR, log, new_track_id
 
 QUEUE_PATH = os.path.join(BASE_DIR, "log", "queue.json")
 _lock = threading.Lock()
+
+# Statuses where a background worker is actively doing I/O for that track
+# right now — these can't be deleted. Kept here (not just in pipeline.py) so
+# queue_manager itself can enforce it at the data layer too, not just via
+# whatever calls it.
+ACTIVE_STATUSES = ("resolving", "fetching_info", "downloading", "analyzing", "tagging")
 
 
 def _empty_queue():
@@ -59,14 +74,15 @@ def save_queue(queue):
             json.dump(queue, f, indent=2)
 
 
-def add_track(source_url, video_title, playlist_title=None):
+def add_track(source_url, video_title, playlist_title=None, resolved=True):
     queue = load_queue()
     track = {
         "id": new_track_id(),
         "source_url": source_url,
         "playlist_title": playlist_title,
         "video_title": video_title,
-        "status": "queued",
+        "resolved": resolved,
+        "status": "queued" if resolved else "resolving",
         "error_message": None,
         "audio_path": None,
         "candidates": [],
@@ -79,7 +95,7 @@ def add_track(source_url, video_title, playlist_title=None):
     }
     queue["tracks"].append(track)
     save_queue(queue)
-    log(f"Queued track {track['id']}: {video_title}")
+    log(f"Added track {track['id']} (resolved={resolved}): {video_title}")
     return track
 
 
@@ -117,8 +133,28 @@ def list_tracks(status=None):
     return [t for t in queue["tracks"] if t["status"] == status]
 
 
-def reset_queue():
-    """Called once at app startup. The track list is session-only — nothing
-    resumes across a restart, so we start with a clean slate every time."""
-    save_queue(_empty_queue())
-    log("Track list reset for new session.")
+def is_deletable(track):
+    """A card can only be removed if nothing is actively working on it right
+    now. Pending work (queued/resolving), a paused review, or a finished-
+    but-failed attempt (error) are all fine to delete; anything mid-flight
+    is not."""
+    return track.get("status") not in ACTIVE_STATUSES
+
+
+def cleanup_stuck_tracks():
+    """
+    Called once at app startup. Anything left actively mid-processing when
+    the app last closed (downloading, analyzing, tagging, fetching_info) has
+    no in-memory progress to resume — reset it back to "queued" so the
+    worker restarts that stage cleanly. A track still sitting in "resolving"
+    needs no change; the worker already knows how to pick that up as-is.
+    """
+    queue = load_queue()
+    changed = False
+    for t in queue["tracks"]:
+        if t["status"] in ("fetching_info", "downloading", "analyzing", "tagging"):
+            t["status"] = "queued"
+            changed = True
+    if changed:
+        save_queue(queue)
+        log("Reset in-progress tracks to 'queued' after restart.")

@@ -1,13 +1,25 @@
 """
-fingerprint.py - Extract a short clip from a downloaded track and identify it
-via Chromaprint fingerprinting + the AcoustID API (free, open-source stack).
+fingerprint.py - Identify a downloaded track via Chromaprint fingerprinting +
+the AcoustID API (free, open-source stack).
 
 Requires the `fpcalc` binary (ships with Chromaprint) to be on PATH, or
 pointed to via config.json's "fpcalc_path".
+
+IMPORTANT: we fingerprint the full downloaded audio file directly, capped at
+`maxlength` seconds via fpcalc's own "-length" flag, rather than pre-trimming
+a separate short clip with ffmpeg first. That distinction matters a lot:
+fpcalc's "-length" only limits how much audio it *decodes for the fingerprint
+calculation* — the DURATION it reports (and that we submit to AcoustID) still
+reflects the file's true total length, read from the container itself. That
+duration is a real scoring signal in AcoustID's matching algorithm, compared
+against known recording lengths in its database. Pre-trimming a standalone
+25-40 second clip file meant fpcalc correctly reported *that clip's own*
+short duration — so we were telling AcoustID "this recording is 25 seconds
+long" for songs that are actually several minutes long, which tanked match
+scores to zero regardless of how clean the fingerprint itself was.
 """
 
 import os
-import subprocess
 
 import requests
 
@@ -21,55 +33,18 @@ except ImportError:
 ACOUSTID_LOOKUP_URL = "https://api.acoustid.org/v2/lookup"
 
 
-def extract_clip(source_path, clip_path, offset_seconds, duration_seconds, ffmpeg_path="ffmpeg"):
+def identify(audio_path, maxlength=60):
     """
-    Trim a short clip out of the middle of the track for fingerprinting.
+    Fingerprint the track via pyacoustid (Chromaprint/fpcalc), then query the
+    AcoustID lookup endpoint directly with `requests` rather than going
+    through pyacoustid's lookup()/parse_lookup_result() wrappers — those have
+    proven inconsistent across versions at surfacing AcoustID's actual error
+    message on failure. Parsing the raw JSON ourselves guarantees we always
+    see AcoustID's real error code and message when something fails.
 
-    Always re-encodes rather than using "-acodec copy" (stream copy). Stream
-    copy combined with "-ss" seeking is a known-flaky combination for MP3:
-    ffmpeg can exit with code 0 (success) while producing a malformed clip —
-    misaligned frame data that a decoder tolerates well enough to produce
-    *a* fingerprint, just not one that corresponds to the real audio. Since
-    that failure is silent (no non-zero exit code to catch), it was
-    previously slipping through and causing every AcoustID lookup on the
-    resulting clip to come back with zero matches, even for very well-known
-    songs. Re-encoding costs a bit of extra time but avoids the whole
-    failure class.
-    """
-    cmd = [
-        ffmpeg_path, "-y",
-        "-ss", str(offset_seconds),
-        "-t", str(duration_seconds),
-        "-i", source_path,
-        clip_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg clip extraction failed: {result.stderr[-500:]}")
-
-    if not os.path.exists(clip_path):
-        raise RuntimeError("Failed to extract fingerprinting clip")
-
-    # Sanity-check the output: a valid few-seconds-of-audio MP3 clip should
-    # be at least a few KB. A near-empty file means something went wrong
-    # even though ffmpeg reported success — better to catch it here with a
-    # clear error than silently fingerprint garbage.
-    clip_size = os.path.getsize(clip_path)
-    if clip_size < 5000:
-        raise RuntimeError(f"Extracted clip is suspiciously small ({clip_size} bytes) — likely corrupted or silent")
-    return clip_path
-
-
-def identify(clip_path):
-    """
-    Fingerprint the clip via pyacoustid (Chromaprint/fpcalc — this part is
-    reliable and version-stable), then query the AcoustID lookup endpoint
-    directly with `requests` rather than going through pyacoustid's
-    lookup()/parse_lookup_result() wrappers. Those wrappers have proven
-    inconsistent across versions at surfacing AcoustID's actual error
-    message on failure (we were only ever seeing a terse "status: error"
-    with no explanation) — parsing the raw JSON ourselves guarantees we
-    always see AcoustID's real error code and message when something fails.
+    `maxlength` caps how much audio fpcalc decodes for speed — it does NOT
+    affect the duration reported to AcoustID, which always reflects the
+    file's true total length (see module docstring).
 
     Returns a list of candidates: [{"title", "artist", "score", "mb_recording_id"}]
     sorted by descending confidence score. Empty list if no match, no API
@@ -86,16 +61,17 @@ def identify(clip_path):
         log("pyacoustid not installed; skipping fingerprint identification", "error")
         return []
 
+    if not os.path.exists(audio_path):
+        log(f"Audio file not found for fingerprinting: {audio_path}", "error")
+        return []
+
     os.environ.setdefault("FPCALC", cfg.get("fpcalc_path", "fpcalc"))
-    log(f"Fingerprinting backend: chromaprint lib available={acoustid.have_chromaprint}, "
-        f"audioread available={acoustid.have_audioread} "
-        f"(expect both False so fpcalc.exe is used)")
 
     try:
-        duration, fingerprint_data = acoustid.fingerprint_file(clip_path)
+        duration, fingerprint_data = acoustid.fingerprint_file(audio_path, maxlength=maxlength)
         fp_len = len(fingerprint_data) if fingerprint_data else 0
-        log(f"Fingerprint generated: duration={duration}s, fingerprint length={fp_len} chars, "
-            f"clip file size={os.path.getsize(clip_path) if os.path.exists(clip_path) else 'already deleted'} bytes")
+        log(f"Fingerprint generated: reported duration={duration}s (true track length), "
+            f"fingerprint length={fp_len} chars, decoded up to {maxlength}s for the calculation")
     except acoustid.NoBackendError:
         log("Chromaprint/fpcalc not found. Install Chromaprint and ensure fpcalc is on PATH.", "error")
         return []
@@ -106,14 +82,11 @@ def identify(clip_path):
     # fpcalc returns the fingerprint as bytes. Decode it to a plain string
     # explicitly rather than handing bytes straight into requests' form-data
     # encoding alongside int/str values — mixed-type form data doesn't
-    # always get encoded the way you'd expect, and a fingerprint that's even
-    # slightly mangled in transit will just look like "no match" with no
-    # error, since the request itself is still perfectly well-formed.
+    # always get encoded the way you'd expect.
     if isinstance(fingerprint_data, (bytes, bytearray)):
         fingerprint_str = fingerprint_data.decode("ascii")
     else:
         fingerprint_str = fingerprint_data
-    log(f"Fingerprint preview (first 40 chars as sent): {fingerprint_str[:40]!r}")
 
     try:
         resp = requests.post(
@@ -139,20 +112,15 @@ def identify(clip_path):
         error = response.get("error", {})
         log(
             f"AcoustID lookup failed — code: {error.get('code', 'unknown')}, "
-            f"message: {error.get('message', 'no message provided')}. "
-            f"(Common causes: invalid/expired API key, or a malformed fingerprint request.)",
+            f"message: {error.get('message', 'no message provided')}.",
             "error",
         )
         return []
 
     raw_results = response.get("results", [])
     linked = [r for r in raw_results if r.get("recordings")]
-    unlinked_scores = [round(r.get("score", 0), 3) for r in raw_results if not r.get("recordings")]
-    log(
-        f"AcoustID raw response: {len(raw_results)} fingerprint match(es) total, "
-        f"{len(linked)} linked to recording metadata, "
-        f"{len(unlinked_scores)} fingerprint-only (unlinked scores: {unlinked_scores})"
-    )
+    log(f"AcoustID raw response: {len(raw_results)} fingerprint match(es) total, "
+        f"{len(linked)} linked to recording metadata")
 
     results = []
     for r in linked:
@@ -170,7 +138,6 @@ def identify(clip_path):
                 "mb_recording_id": rec.get("id"),
             })
 
-    # De-dupe by (title, artist), keep highest score
     best = {}
     for r in results:
         key = (r["title"].lower(), r["artist"].lower())

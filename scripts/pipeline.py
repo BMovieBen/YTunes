@@ -1,19 +1,25 @@
 """
 pipeline.py - Orchestrates the YTunes processing pipeline:
-  1. Resolve a URL (video or playlist) into queue entries
-  2. Download audio for a queued track
-  3. Extract a clip and fingerprint/identify it via AcoustID
-  4. Run a light initial metadata lookup (top pick per source) so review can
-     start quickly without hammering every source up front
-  5. On demand ("Find more matches"), run a broader search across more
-     fingerprint guesses and more results per source
-  6. Once the user confirms metadata (edited or as-is), tag and move the file
+  1. Add a URL -> immediately visible as a placeholder card, resolved in
+     the background (single video, or expanded into one card per playlist
+     entry)
+  2. Download audio for a resolved track
+  3. Fingerprint it via AcoustID + a light initial metadata lookup (top pick
+     per source) so review can start quickly
+  4. On demand ("Find more matches"), run a broader search
+  5. Once the user confirms metadata, tag the file, move it to the
+     configured output folder, and remove the card — there's no lingering
+     "complete" state to manage
 
 Processing starts automatically the moment a URL is added — no manual
 "Process Queue" trigger. A single background worker thread handles the
 queue; if one's already running when new tracks are added, they're picked
 up by that same worker rather than needing a second trigger (see the
 locking note on start_background_processing for how that race is avoided).
+
+The queue persists across app restarts (see queue_manager.py) — anything
+left mid-processing when the app closes gets reset to a re-runnable state
+on the next startup rather than lost.
 """
 
 import os
@@ -31,20 +37,28 @@ from utils import load_config, log
 _worker_lock = threading.Lock()   # guards _worker_running only — held briefly, never during I/O
 _worker_running = False
 
+# Statuses where a track is waiting for the worker but nothing is actively
+# happening yet — the worker picks its next track from these, in order.
+PENDING_STATUSES = ("resolving", "queued")
+
+# Statuses where a background thread is actively doing I/O for a specific
+# track right now. Deleting a card in one of these states isn't allowed —
+# only pending work (queued/resolving/needs_review) or a finished attempt
+# (error) can be removed.
+ACTIVE_STATUSES = ("resolving", "fetching_info", "downloading", "analyzing", "tagging")
+
 
 def add_url(url):
-    """Resolve a URL (single video or playlist) and add each track to the queue,
-    then immediately kick off background processing (or, if a worker is
-    already running, it will pick these up automatically — see the locking
-    note in start_background_processing)."""
-    entries = fetch_youtube.resolve_urls(url)
-    added = []
-    for entry in entries:
-        track = qm.add_track(entry["url"], entry["title"], entry.get("playlist_title"))
-        added.append(track)
-    if added:
-        start_background_processing()
-    return added
+    """
+    Immediately add a lightweight placeholder card (video_title is just the
+    raw URL at this point, so it shows up in the UI right away instead of
+    waiting on a network call), then kick off background processing, which
+    resolves the URL — expanding a playlist into one card per entry, or
+    just filling in the real title for a single video.
+    """
+    track = qm.add_track(url, video_title=url, playlist_title=None, resolved=False)
+    start_background_processing()
+    return [track]
 
 
 def start_background_processing():
@@ -71,26 +85,32 @@ def start_background_processing():
     return thread
 
 
+def _next_pending_track():
+    for status in PENDING_STATUSES:
+        tracks = qm.list_tracks(status=status)
+        if tracks:
+            return tracks[0]
+    return None
+
+
 def _worker_loop():
     global _worker_running
     processed_count = 0
     try:
         cfg = load_config()
         while True:
-            pending = qm.list_tracks(status="queued")
-            if not pending:
+            track = _next_pending_track()
+            if track is None:
                 # Atomic check-and-stop: only declare "done" if nothing was
-                # added between our list_tracks() call above and grabbing
-                # the lock here. If something was, fall through and keep going.
+                # added between our check above and grabbing the lock here.
+                # If something was, fall through and keep going.
                 with _worker_lock:
-                    pending = qm.list_tracks(status="queued")
-                    if not pending:
+                    track = _next_pending_track()
+                    if track is None:
                         _worker_running = False
                         break
-                    # else: something arrived just in time — keep processing
                     continue
-            track = pending[0]
-            log(f"Worker picked up track {track['id']}: {track.get('video_title')}")
+            log(f"Worker picked up track {track['id']} (status={track['status']}): {track.get('video_title')}")
             try:
                 _process_single_track(track, cfg)
             except Exception as e:
@@ -112,6 +132,10 @@ def _worker_loop():
 
 
 def _process_single_track(track, cfg):
+    if track["status"] == "resolving":
+        _resolve_track(track, cfg)
+        return
+
     track_id = track["id"]
 
     # Step 1: grab YouTube's own title/channel/thumbnail first — this is a
@@ -163,6 +187,43 @@ def _process_single_track(track, cfg):
     log(f"Track {track_id} ready for review with {len(candidates)} initial candidate(s)")
 
 
+def _resolve_track(track, cfg):
+    """
+    Resolve the placeholder's raw URL into real title/metadata. A single
+    video updates this same card in place; a playlist replaces it with one
+    resolved card per entry (each starting fresh in the normal "queued"
+    pipeline).
+    """
+    track_id = track["id"]
+    try:
+        entries = fetch_youtube.resolve_urls(track["source_url"])
+    except Exception as e:
+        log(f"Failed to resolve URL for track {track_id}: {e}", "error")
+        qm.update_track(track_id, status="error", error_message=str(e))
+        return
+
+    if not entries:
+        qm.update_track(track_id, status="error", error_message="No video found at that URL")
+        return
+
+    if len(entries) == 1:
+        entry = entries[0]
+        qm.update_track(
+            track_id,
+            source_url=entry["url"],
+            video_title=entry["title"],
+            playlist_title=entry.get("playlist_title"),
+            resolved=True,
+            status="queued",
+        )
+        log(f"Resolved track {track_id}: {entry['title']}")
+    else:
+        qm.remove_track(track_id)
+        for entry in entries:
+            qm.add_track(entry["url"], entry["title"], entry.get("playlist_title"), resolved=True)
+        log(f"Resolved playlist for track {track_id} into {len(entries)} track(s)")
+
+
 def find_more_matches(track_id, custom_query=None):
     """
     On-demand broader search, triggered by the user clicking "Find more
@@ -207,54 +268,22 @@ def find_more_matches(track_id, custom_query=None):
 
 
 def _fingerprint_track(track_id, audio_path, cfg):
-    """
-    Try fingerprinting a few different windows of the track before giving
-    up. AcoustID's match quality can vary a lot section-to-section within
-    the very same recording — their crowd-sourced database tends to have
-    denser fingerprint coverage over commonly-clipped regions (intros,
-    hooks) than over less-frequently-submitted stretches. A single fixed
-    offset is a bit of a gamble; trying a couple of alternate windows first
-    is cheap compared to falling back to an unverified text-search guess.
-    """
-    base_offset = cfg.get("clip_offset_seconds", 10)
-    duration = cfg.get("clip_duration_seconds", 40)
-    ffmpeg_path = cfg.get("ffmpeg_path", "ffmpeg")
+    """Fingerprint the full downloaded file directly (see fingerprint.py's
+    module docstring for why we no longer pre-trim a separate clip)."""
+    maxlength = cfg.get("fingerprint_max_seconds", 60)
+    try:
+        fp_matches = fingerprint.identify(audio_path, maxlength=maxlength)
+    except Exception as e:
+        log(f"Fingerprinting failed for track {track_id}: {e}", "error")
+        return []
 
-    # Configured window first, then a couple of alternates further into and
-    # near the start of the track. Dedupe in case the configured offset
-    # already happens to equal one of the fallbacks.
-    attempts = []
-    for offset in (base_offset, base_offset + 60, 5):
-        if offset >= 0 and offset not in attempts:
-            attempts.append(offset)
-
-    fp_matches = []
-    for i, offset in enumerate(attempts):
-        clip_path = os.path.join(cfg["temp_folder"], f"{track_id}_clip.mp3")
-        try:
-            fingerprint.extract_clip(audio_path, clip_path, offset, duration, ffmpeg_path)
-            fp_matches = fingerprint.identify(clip_path)
-        except Exception as e:
-            log(f"Fingerprinting attempt at offset {offset}s failed for track {track_id}: {e}", "error")
-            fp_matches = []
-        finally:
-            if cfg.get("debug_keep_clips", False):
-                if os.path.exists(clip_path):
-                    log(f"debug_keep_clips is on — kept fingerprinting clip at {clip_path}")
-            elif os.path.exists(clip_path):
-                os.remove(clip_path)
-
-        if fp_matches:
-            log(f"Track {track_id}: fingerprint succeeded at offset {offset}s (attempt {i + 1}/{len(attempts)}), "
-                f"top guess '{fp_matches[0]['title']}' by '{fp_matches[0]['artist']}' "
-                f"(score {fp_matches[0]['score']})")
-            break
-        elif i < len(attempts) - 1:
-            log(f"Track {track_id}: no match at offset {offset}s, trying another window")
-        else:
-            log(f"Track {track_id}: fingerprint returned no matches after trying offsets {attempts} "
-                f"(check acoustid_api_key and fpcalc if this happens consistently)")
-
+    if fp_matches:
+        log(f"Track {track_id}: fingerprint identified {len(fp_matches)} candidate(s), "
+            f"top guess '{fp_matches[0]['title']}' by '{fp_matches[0]['artist']}' "
+            f"(score {fp_matches[0]['score']})")
+    else:
+        log(f"Track {track_id}: fingerprint returned no matches "
+            f"(check acoustid_api_key and fpcalc if this happens consistently)")
     return fp_matches
 
 
@@ -312,23 +341,29 @@ def _candidate_key(c):
     return (c["source"], c["title"].lower(), c["artist"].lower(), (c.get("album") or "").lower())
 
 
-def confirm_track(track_id, selected_metadata, custom_art_path=None):
+def confirm_track(track_id, selected_metadata):
     """
     Called once the user confirms the edit form (whatever values it holds,
-    pre-filled or edited). Tags the file and moves it to the output folder.
+    pre-filled or edited). Tags the file, moves it to the configured output
+    folder, then removes the card entirely and cleans up any leftover temp
+    asset (a custom art upload) — there's no "complete" state to linger in;
+    once tagged, the file exists in the output folder and YTunes has
+    nothing further to track for it.
     """
     track = qm.get_track(track_id)
     if not track:
         raise ValueError(f"Track {track_id} not found")
 
-    qm.update_track(
-        track_id,
-        selected=selected_metadata,
-        custom_art_path=custom_art_path,
-        status="tagging",
-    )
+    qm.update_track(track_id, selected=selected_metadata, status="tagging")
     track = qm.get_track(track_id)
 
     output_path = tag_mp3.tag_and_move(track)
-    qm.update_track(track_id, status="complete", output_path=output_path)
+
+    if track.get("custom_art_path") and os.path.exists(track["custom_art_path"]):
+        try:
+            os.remove(track["custom_art_path"])
+        except OSError as e:
+            log(f"Failed to delete temp art {track['custom_art_path']}: {e}", "error")
+
+    qm.remove_track(track_id)
     return output_path

@@ -3,14 +3,41 @@ tag_mp3.py - Embed ID3 metadata + album art into the downloaded MP3 and move
 it into the flat output folder. Mirrors Article2Pod's tag-mp3.py.
 """
 
+import io
 import os
 import shutil
 
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TCON, TRCK, APIC, ID3NoHeaderError
 from mutagen.mp3 import MP3
+from PIL import Image
 
 from utils import load_config, log, safe_filename
 from metadata_lookup import download_art
+
+
+def _crop_to_square(image_bytes):
+    """
+    Center-crop art to a square, re-encoded as JPEG. Album art is
+    conventionally square, but source images rarely are on their own —
+    YouTube thumbnails in particular are 16:9. Apple Music (and most
+    players) won't crop cover art for you; it'll just display it
+    letterboxed/stretched as-is, so we do the cropping ourselves before
+    it ever gets embedded.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGB")  # normalize mode — JPEG needs RGB, sources vary (RGBA/P/etc.)
+        width, height = img.size
+        side = min(width, height)
+        left = (width - side) // 2
+        top = (height - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception as e:
+        log(f"Failed to center-crop album art, embedding original instead: {e}", "error")
+        return image_bytes
 
 
 def tag_and_move(track):
@@ -40,6 +67,9 @@ def tag_and_move(track):
         if os.path.exists(default_art):
             with open(default_art, "rb") as f:
                 art_bytes = f.read()
+
+    if art_bytes:
+        art_bytes = _crop_to_square(art_bytes)
 
     # Write ID3 tags
     try:
