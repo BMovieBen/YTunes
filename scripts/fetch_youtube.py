@@ -7,6 +7,7 @@ expand playlists into individual queue entries.
 import os
 import subprocess
 import json
+import time
 
 from utils import log, safe_filename
 
@@ -92,14 +93,22 @@ def download_audio(url, temp_folder, track_id):
     cmd.extend(["--remote-components", "ejs:github"])
     cmd.append(url)
     log(f"Downloading audio for track {track_id} from {url}")
-    try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=True)
-    except subprocess.CalledProcessError as e:
-        log(f"yt-dlp download failed for {url}: {e.stderr}", "error")
-        raise RuntimeError(f"Download failed: {e.stderr[-500:] if e.stderr else 'unknown error'}")
-    except subprocess.TimeoutExpired:
-        log(f"yt-dlp download timed out for {url}", "error")
-        raise RuntimeError("Download timed out")
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=True)
+            break
+        except subprocess.CalledProcessError as e:
+            # YouTube sometimes returns an empty response; a retry normally succeeds.
+            if "Did not get any data blocks" in (e.stderr or "") and attempt < attempts:
+                log(f"Empty response for {url}, retrying ({attempt}/{attempts - 1})", "warning")
+                time.sleep(3)
+                continue
+            log(f"yt-dlp download failed for {url}: {e.stderr}", "error")
+            raise RuntimeError(f"Download failed: {e.stderr[-500:] if e.stderr else 'unknown error'}")
+        except subprocess.TimeoutExpired:
+            log(f"yt-dlp download timed out for {url}", "error")
+            raise RuntimeError("Download timed out")
 
     expected_path = os.path.join(temp_folder, f"{track_id}.mp3")
     if not os.path.exists(expected_path):

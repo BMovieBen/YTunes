@@ -378,6 +378,10 @@ function renderTrack(t) {
     rightButton = `<button class="btn" onclick="confirmTrack('${t.id}')"><i class="fa-solid fa-tag"></i> Confirm &amp; Tag</button>`;
   }
 
+  if (t.status === 'error') {
+    rightButton = `<button class="btn" onclick="retryTrack('${t.id}')"><i class="fa-solid fa-rotate-right"></i> Retry</button>`;
+  }
+
   const canDelete = !NON_DELETABLE_STATUSES.includes(t.status);
   const removeButton = canDelete
     ? `<button class="btn gray small icon-only" onclick='removeTrack("${t.id}")' title="Remove"><i class="fa-solid fa-trash"></i></button>`
@@ -736,6 +740,14 @@ async function confirmTrack(trackId) {
 function valOf(id) {
   const el = document.getElementById(id);
   return el ? el.value.trim() : '';
+}
+
+async function retryTrack(trackId) {
+  const resp = await fetch(`/track/${trackId}/retry`, {method: 'POST'});
+  const data = await resp.json();
+  if (data.error) alert(data.error);
+  await refreshQueue();
+  pollWhileActive();
 }
 
 async function removeTrack(trackId) {

@@ -85,6 +85,22 @@ def start_background_processing():
     return thread
 
 
+def retry_track(track_id):
+    """Re-queue a failed track from the start (resolve if never resolved,
+    otherwise download again)."""
+    track = qm.get_track(track_id)
+    if not track:
+        raise ValueError("Track not found")
+    if track["status"] != "error":
+        raise ValueError(f"Can't retry a track that's {track['status']}")
+    qm.update_track(
+        track_id,
+        status="queued" if track.get("resolved") else "resolving",
+        error_message=None,
+    )
+    start_background_processing()
+
+
 def _next_pending_track():
     for status in PENDING_STATUSES:
         tracks = qm.list_tracks(status=status)

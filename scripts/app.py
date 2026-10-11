@@ -119,6 +119,15 @@ def track_sample(track_id):
     return send_file(track["audio_path"], mimetype="audio/mpeg")
 
 
+@app.route("/track/<track_id>/retry", methods=["POST"])
+def retry_track(track_id):
+    try:
+        pipeline.retry_track(track_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"status": "queued"})
+
+
 @app.route("/track/<track_id>", methods=["DELETE"])
 def remove_track(track_id):
     """Removing a card also deletes any file it produced. Not allowed while
