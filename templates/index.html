@@ -129,7 +129,6 @@
     transition: border-color 0.2s;
   }
   .queue-card.status-needs_review { border-left-color: var(--accent); }
-  .queue-card.status-complete { border-left-color: #3ecf72; }
   .queue-card.status-error { border-left-color: var(--danger); }
   .queue-card.status-queued, .queue-card.status-resolving, .queue-card.status-fetching_info,
   .queue-card.status-downloading, .queue-card.status-analyzing,
@@ -152,7 +151,6 @@
     flex-shrink: 0;
   }
   .status-badge.needs_review { background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(255,59,59,0.3); }
-  .status-badge.complete { background: rgba(62,207,114,0.12); color: #3ecf72; }
   .status-badge.error { background: rgba(255,107,107,0.12); color: var(--danger); }
 
   .card-error {
@@ -277,6 +275,7 @@
     display: flex; align-items: center; gap: 6px;
   }
   .auto-note.matched { color: var(--accent); }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -289,76 +288,146 @@
 <main>
   <div class="input-section">
     <input type="text" id="url-input" placeholder="Paste a YouTube video or playlist URL...">
-    <button class="btn icon-only" onclick="addUrl()" title="Add"><i class="fa-solid fa-plus"></i></button>
+    <button class="btn icon-only" id="add-button" title="Add"><i class="fa-solid fa-plus"></i></button>
   </div>
 
   <section>
-    <div id="queue-container"><div class="empty">Loading...</div></div>
+    <div id="empty-state" class="empty">Loading...</div>
+    <div id="queue-container"></div>
   </section>
 </main>
 
 <script>
-const AUTO_MATCH_THRESHOLD = {{ auto_match_threshold }};
-const FINGERPRINT_MAX_SECONDS = {{ fingerprint_max_seconds }};
+const AUTO_MATCH_THRESHOLD = {{ auto_match_threshold|tojson }};
+const FINGERPRINT_MAX_SECONDS = {{ fingerprint_max_seconds|tojson }};
+const STATUS = {{ status_groups|tojson }};   // {in_progress: [...], not_deletable: [...]}
 
-let latestTracks = {};   // id -> full track object from server
-let formCache = {};      // id -> {title, artist, album, year, genre, track_number, art_url, isCustomArt}
+const container = document.getElementById('queue-container');
+const emptyState = document.getElementById('empty-state');
+const urlInput = document.getElementById('url-input');
 
-// ---------- Add / background processing ----------
+const tracks = new Map();           // id -> track from the server (oldest first)
+const renderedVersion = new Map();  // id -> track.version the card was last drawn from
+const formCache = {};               // id -> edit-form values the user has (or was auto-filled)
+const queryCache = {};              // id -> "Find more" search text
+const revealedMatches = new Set();  // ids where "Find more" has been clicked
 
-async function addUrl() {
-  const input = document.getElementById('url-input');
-  const url = input.value.trim();
-  if (!url) return;
-  input.value = '';
-  const resp = await fetch('/add', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({url})
-  });
-  const data = await resp.json();
-  if (data.error) alert(data.error);
-  await refreshQueue();
-  pollWhileActive();
+// ---------- Server calls ----------
+
+async function api(url, options = {}) {
+  try {
+    const resp = await fetch(url, options);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok && !data.error) data.error = `Request failed (${resp.status})`;
+    return data;
+  } catch (e) {
+    return {error: `Can't reach YTunes: ${e.message}`};
+  }
 }
 
-let pollActive = false;
-// Keep polling while anything is still moving toward needs_review/error —
-// includes "queued" since a track sitting there is about to be picked up.
-const POLL_ACTIVE_STATUSES = ['resolving', 'queued', 'fetching_info', 'downloading', 'analyzing', 'tagging'];
-// Narrower set: a background worker is actively doing I/O for these right
-// now, so deleting isn't allowed (mirrors queue_manager.ACTIVE_STATUSES
-// server-side — this is just the client-side guard for a responsive UI,
-// the server enforces it independently too).
-const NON_DELETABLE_STATUSES = ['resolving', 'fetching_info', 'downloading', 'analyzing', 'tagging'];
+function postJson(url, body) {
+  return api(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+}
+
+// ---------- Polling ----------
+
+let polling = false;
 
 async function pollWhileActive() {
-  if (pollActive) return;
-  pollActive = true;
-  const step = async () => {
-    const tracks = await refreshQueue();
-    const stillActive = tracks.some(t => POLL_ACTIVE_STATUSES.includes(t.status));
-    if (stillActive) {
-      setTimeout(step, 2000);
-    } else {
-      pollActive = false;
+  if (polling) return;
+  polling = true;
+  try {
+    while (true) {
+      const list = await refreshQueue();
+      if (!list.some(t => STATUS.in_progress.includes(t.status))) break;
+      await new Promise(r => setTimeout(r, 2000));
     }
-  };
-  step();
+  } finally {
+    polling = false;
+  }
 }
 
+// Fetch the list and update only the cards whose data changed, so typing,
+// focus and a playing preview aren't disturbed by other tracks' progress.
 async function refreshQueue() {
-  const resp = await fetch('/queue');
-  const tracks = await resp.json();
-  latestTracks = {};
-  tracks.forEach(t => { latestTracks[t.id] = t; });
-
-  const container = document.getElementById('queue-container');
-  if (tracks.length === 0) {
-    container.innerHTML = '<div class="empty">Nothing here yet — paste a URL above to get started.</div>';
-  } else {
-    container.innerHTML = tracks.slice().reverse().map(renderTrack).join('');
+  let list;
+  try {
+    const resp = await fetch('/queue');
+    list = await resp.json();
+  } catch (e) {
+    return [...tracks.values()];
   }
-  return tracks;
+
+  const ids = new Set(list.map(t => t.id));
+  for (const id of tracks.keys()) {
+    if (!ids.has(id)) forgetTrack(id);
+  }
+  tracks.clear();
+  list.forEach(t => tracks.set(t.id, t));
+
+  const newestFirst = list.slice().reverse();
+  newestFirst.forEach((t, i) => {
+    let card = cardEl(t.id);
+    if (!card || renderedVersion.get(t.id) !== t.version) {
+      card = redrawCard(t, card);
+    }
+    if (container.children[i] !== card) {
+      container.insertBefore(card, container.children[i] || null);
+    }
+  });
+
+  emptyState.textContent = 'Nothing here yet — paste a URL above to get started.';
+  emptyState.classList.toggle('hidden', list.length > 0);
+  return list;
+}
+
+function cardEl(id) {
+  return container.querySelector(`.queue-card[data-track-id="${id}"]`);
+}
+
+function forgetTrack(id) {
+  const card = cardEl(id);
+  if (card) {
+    if (preview && card.contains(preview.button)) stopPreview();
+    card.remove();
+  }
+  renderedVersion.delete(id);
+  delete formCache[id];
+  delete queryCache[id];
+  revealedMatches.delete(id);
+}
+
+function redrawCard(t, oldCard) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = renderTrack(t).trim();
+  const card = tpl.content.firstElementChild;
+
+  if (oldCard) {
+    // Keep focus and cursor position if the user was typing in this card.
+    const active = document.activeElement;
+    const focusId = oldCard.contains(active) && active.id ? active.id : null;
+    const sel = focusId && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null;
+    oldCard.replaceWith(card);
+    if (focusId) {
+      const el = document.getElementById(focusId);
+      if (el) {
+        el.focus();
+        if (sel && el.setSelectionRange) {
+          try { el.setSelectionRange(sel[0], sel[1]); } catch (e) {}
+        }
+      }
+    }
+  }
+  // Keep a playing preview's pause button in sync with the new markup.
+  if (preview) {
+    const btn = card.querySelector(`[data-preview-key="${cssEscape(preview.key)}"]`);
+    if (btn) {
+      preview.button = btn;
+      btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+    }
+  }
+  renderedVersion.set(t.id, t.version);
+  return card;
 }
 
 // ---------- Rendering ----------
@@ -366,37 +435,33 @@ async function refreshQueue() {
 function renderTrack(t) {
   const badgeLabel = t.status.replace(/_/g, ' ');
   let body = '';
-
   if (t.status === 'needs_review') {
     body = renderReviewBody(t);
   } else if (t.youtube_reference) {
-    body = renderProgressBody(t);
+    body = `<div class="review-stack">${renderYoutubeCard(t, false)}</div>`;
   }
 
   let rightButton = '<span></span>';
   if (t.status === 'needs_review') {
-    rightButton = `<button class="btn" onclick="confirmTrack('${t.id}')"><i class="fa-solid fa-tag"></i> Confirm &amp; Tag</button>`;
+    rightButton = `<button class="btn" data-action="confirm"><i class="fa-solid fa-tag"></i> Confirm &amp; Tag</button>`;
+  } else if (t.status === 'error') {
+    rightButton = `<button class="btn" data-action="retry"><i class="fa-solid fa-rotate-right"></i> Retry</button>`;
   }
 
-  if (t.status === 'error') {
-    rightButton = `<button class="btn" onclick="retryTrack('${t.id}')"><i class="fa-solid fa-rotate-right"></i> Retry</button>`;
-  }
-
-  const canDelete = !NON_DELETABLE_STATUSES.includes(t.status);
-  const removeButton = canDelete
-    ? `<button class="btn gray small icon-only" onclick='removeTrack("${t.id}")' title="Remove"><i class="fa-solid fa-trash"></i></button>`
-    : `<button class="btn gray small icon-only" disabled title="Can't remove while ${escapeAttr(badgeLabel)}"><i class="fa-solid fa-trash"></i></button>`;
+  const removeButton = STATUS.not_deletable.includes(t.status)
+    ? `<button class="btn gray small icon-only" disabled title="Can't remove while ${esc(badgeLabel)}"><i class="fa-solid fa-trash"></i></button>`
+    : `<button class="btn gray small icon-only" data-action="remove" title="Remove"><i class="fa-solid fa-trash"></i></button>`;
 
   return `
-    <div class="queue-card status-${t.status}" data-track-id="${t.id}">
+    <div class="queue-card status-${esc(t.status)}" data-track-id="${esc(t.id)}">
       <div class="card-header">
         <div>
-          <div class="card-header-title">${escapeHtml(t.video_title)}</div>
-          ${t.playlist_title ? `<div class="card-sub">From playlist: ${escapeHtml(t.playlist_title)}</div>` : ''}
+          <div class="card-header-title">${esc(t.video_title)}</div>
+          ${t.playlist_title ? `<div class="card-sub">From playlist: ${esc(t.playlist_title)}</div>` : ''}
         </div>
-        <div class="status-badge ${t.status}">${badgeLabel}</div>
+        <div class="status-badge ${esc(t.status)}">${esc(badgeLabel)}</div>
       </div>
-      ${t.error_message ? `<div class="card-error">${escapeHtml(t.error_message)}</div>` : ''}
+      ${t.error_message ? `<div class="card-error">${esc(t.error_message)}</div>` : ''}
       ${body}
       <div class="confirm-row" style="margin-top:12px;">
         ${removeButton}
@@ -406,138 +471,129 @@ function renderTrack(t) {
   `;
 }
 
-function renderProgressBody(t) {
-  const ref = t.youtube_reference;
+function artImg(url, cls) {
+  return url ? `<img class="${cls}" src="${esc(url)}" alt="">` : `<div class="${cls}"></div>`;
+}
+
+function renderYoutubeCard(t, withActions) {
+  const ref = t.youtube_reference || {};
+  const actions = withActions ? `
+    <div class="info-actions">
+      <button class="btn gray icon-only" data-action="preview" data-preview-key="${esc(t.id)}:sample"
+              data-src="/track/${esc(t.id)}/sample" data-max-seconds="${FINGERPRINT_MAX_SECONDS}"
+              title="Play the ${FINGERPRINT_MAX_SECONDS}s sample used for fingerprinting"><i class="fa-solid fa-play"></i></button>
+      <button class="btn gray icon-only" data-action="apply" data-candidate="ref" title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
+    </div>` : '';
   return `
-    <div class="review-stack">
-      <div class="info-card">
-        <div class="info-label"><i class="fa-brands fa-youtube"></i> YouTube</div>
-        <div class="info-body">
-          ${ref.art_url ? `<img class="info-art" src="${ref.art_url}">` : `<div class="info-art"></div>`}
-          <div class="info-text">
-            <div class="info-title" title="${escapeAttr(ref.title)}">${escapeHtml(ref.title || 'Untitled')}</div>
-            <div class="info-meta" title="${escapeAttr(ref.artist)}">${escapeHtml(ref.artist || 'Unknown channel')}</div>
-          </div>
+    <div class="info-card">
+      <div class="info-label"><i class="fa-brands fa-youtube"></i> ${withActions ? 'Original &middot; ' : ''}YouTube</div>
+      <div class="info-body">
+        ${artImg(ref.art_url, 'info-art')}
+        <div class="info-text">
+          <div class="info-title" title="${esc(ref.title)}">${esc(ref.title || 'Untitled')}</div>
+          <div class="info-meta" title="${esc(ref.artist)}">${esc(ref.artist || 'Unknown channel')}</div>
         </div>
+        ${actions}
       </div>
     </div>
   `;
 }
-
-let revealedMatches = {}; // trackId -> bool, true once "Find more" has been clicked
 
 function renderReviewBody(t) {
   const ref = t.youtube_reference || {};
   const candidates = t.candidates || [];
   const top = candidates[0] || null;
-  // Only show anything beyond the top match once the user has explicitly
-  // asked for more — even if the initial lookup already turned up extras.
-  const rest = revealedMatches[t.id] ? candidates.slice(1) : [];
 
   if (!formCache[t.id]) {
-    // Auto-fill: a confident match (>= threshold) wins; otherwise fall back
-    // to the YouTube reference data rather than a low-confidence guess.
+    // Auto-fill: a confident match wins; otherwise use the YouTube data
+    // rather than a low-confidence guess.
     const useTop = top && top.confidence >= AUTO_MATCH_THRESHOLD;
-    const basis = useTop ? top : {
-      title: ref.title, artist: ref.artist, album: ref.album,
-      year: ref.year, genre: ref.genre, track_number: ref.track_number,
-      art_url: ref.art_url,
+    formCache[t.id] = {
+      ...formValues(useTop ? top : ref),
+      customArt: false,
+      autoSource: useTop ? 'match' : 'youtube',
+      confidence: useTop ? top.confidence : null,
     };
-    formCache[t.id] = { ...basis, isCustomArt: false, autoSource: useTop ? 'match' : 'youtube' };
   }
 
   return `
-    <div id="matches-${t.id}">
-      ${renderMatchesSection(t.id, ref, top, rest)}
+    <div class="review-stack">
+      ${renderYoutubeCard(t, true)}
+      ${renderTopMatch(t.id, top)}
+      ${revealedMatches.has(t.id) ? renderOtherMatches(t.id, candidates) : ''}
+      <div class="more-matches-row">
+        <input type="text" id="query-${esc(t.id)}" data-query placeholder="Search a different query (optional)" value="${esc(queryCache[t.id] || '')}">
+        <button class="btn gray" data-action="more"><i class="fa-solid fa-magnifying-glass"></i> Find more</button>
+      </div>
     </div>
     ${renderEditForm(t.id, formCache[t.id])}
   `;
 }
 
-function renderMatchesSection(trackId, ref, top, rest) {
-  const originalCard = `
-    <div class="info-card">
-      <div class="info-label"><i class="fa-brands fa-youtube"></i> Original &middot; YouTube</div>
-      <div class="info-body">
-        ${ref.art_url ? `<img class="info-art" src="${ref.art_url}">` : `<div class="info-art"></div>`}
-        <div class="info-text">
-          <div class="info-title" title="${escapeAttr(ref.title)}">${escapeHtml(ref.title || 'Untitled')}</div>
-          <div class="info-meta" title="${escapeAttr(ref.artist)}">${escapeHtml(ref.artist || 'Unknown channel')}</div>
-        </div>
-        <div class="info-actions">
-          <button class="btn gray icon-only" onclick='togglePreview("/track/${trackId}/sample", this, FINGERPRINT_MAX_SECONDS)' title="Play the ${FINGERPRINT_MAX_SECONDS}s sample used for fingerprinting"><i class="fa-solid fa-play"></i></button>
-          <button class="btn gray icon-only" onclick='applyCandidate("${trackId}", ${JSON.stringify(ref)})' title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
+function renderTopMatch(trackId, top) {
+  if (!top) {
+    return `
+      <div class="info-card">
+        <div class="info-label"><i class="fa-solid fa-star"></i> Best match</div>
+        <div class="info-body">
+          <div class="info-art"></div>
+          <div class="info-text">
+            <div class="info-title" style="color:var(--muted);">No metadata match found</div>
+            <div class="info-meta">Try searching below</div>
+          </div>
         </div>
       </div>
-    </div>
-  `;
-
-  const matchCard = top ? `
+    `;
+  }
+  return `
     <div class="info-card">
-      <div class="info-label"><i class="fa-solid fa-star"></i> Best match &middot; ${escapeHtml(top.source)}</div>
+      <div class="info-label"><i class="fa-solid fa-star"></i> Best match &middot; ${esc(top.source)}</div>
       <div class="info-body">
-        ${top.art_url ? `<img class="info-art" src="${top.art_url}">` : `<div class="info-art"></div>`}
+        ${artImg(top.art_url, 'info-art')}
         <div class="info-text">
-          <div class="info-title" title="${escapeAttr(top.title)}">${escapeHtml(top.title)}</div>
-          <div class="info-meta" title="${escapeAttr(top.artist)}">${escapeHtml(top.artist)}${top.album ? ' &middot; ' + escapeHtml(top.album) : ''}</div>
+          <div class="info-title" title="${esc(top.title)}">${esc(top.title)}</div>
+          <div class="info-meta" title="${esc(top.artist)}">${esc(top.artist)}${top.album ? ' &middot; ' + esc(top.album) : ''}</div>
         </div>
         <div class="info-actions">
           ${confidenceBadge(top.confidence)}
-          ${top.preview_url ? `<button class="btn gray icon-only" onclick='togglePreview(${JSON.stringify(top.preview_url)}, this)' title="Play 30s sample"><i class="fa-solid fa-play"></i></button>` : ''}
-          <button class="btn icon-only" onclick='applyCandidate("${trackId}", ${JSON.stringify(top)})' title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
-        </div>
-      </div>
-    </div>
-  ` : `
-    <div class="info-card">
-      <div class="info-label"><i class="fa-solid fa-star"></i> Best match</div>
-      <div class="info-body">
-        <div class="info-art"></div>
-        <div class="info-text">
-          <div class="info-title" style="color:var(--muted);">No metadata match found</div>
-          <div class="info-meta">Try searching below</div>
+          ${previewButton(trackId, 0, top, '')}
+          <button class="btn icon-only" data-action="apply" data-candidate="0" title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
         </div>
       </div>
     </div>
   `;
+}
 
-  const moreRow = `
-    <div class="more-matches-row">
-      <input type="text" id="query-${trackId}" placeholder="Search a different query (optional)">
-      <button class="btn gray" onclick="findMoreMatches('${trackId}', this)"><i class="fa-solid fa-magnifying-glass"></i> Find more</button>
-    </div>
-  `;
-
-  const otherHtml = rest.length > 0 ? `
+function renderOtherMatches(trackId, candidates) {
+  const rest = candidates.slice(1);
+  if (!rest.length) return '';
+  return `
     <div class="other-matches">
       <div class="other-matches-label">Other results (${rest.length})</div>
-      ${rest.map(c => `
+      ${rest.map((c, i) => `
         <div class="other-match-row">
           <div class="other-match-info">
-            ${c.art_url ? `<img src="${c.art_url}">` : ''}
+            ${c.art_url ? `<img src="${esc(c.art_url)}" alt="">` : ''}
             <div class="other-match-text">
-              <div>${escapeHtml(c.title)} &mdash; ${escapeHtml(c.artist)}</div>
-              <div class="sub">${escapeHtml(c.album || '')} ${c.year ? '&middot; ' + escapeHtml(c.year) : ''} &middot; ${escapeHtml(c.source)}</div>
+              <div>${esc(c.title)} &mdash; ${esc(c.artist)}</div>
+              <div class="sub">${esc(c.album || '')} ${c.year ? '&middot; ' + esc(c.year) : ''} &middot; ${esc(c.source)}</div>
             </div>
           </div>
           <div class="other-match-actions">
             ${confidenceBadge(c.confidence)}
-            ${c.preview_url ? `<button class="btn gray small icon-only" onclick='togglePreview(${JSON.stringify(c.preview_url)}, this)' title="Play 30s sample"><i class="fa-solid fa-play"></i></button>` : ''}
-            <button class="btn gray small icon-only" onclick='applyCandidate("${trackId}", ${JSON.stringify(c)})' title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
+            ${previewButton(trackId, i + 1, c, 'small')}
+            <button class="btn gray small icon-only" data-action="apply" data-candidate="${i + 1}" title="Apply this data"><i class="fa-solid fa-arrow-down"></i></button>
           </div>
         </div>
       `).join('')}
     </div>
-  ` : '';
-
-  return `
-    <div class="review-stack">
-      ${originalCard}
-      ${matchCard}
-      ${otherHtml}
-      ${moreRow}
-    </div>
   `;
+}
+
+function previewButton(trackId, index, c, size) {
+  if (!c.preview_url) return '';
+  return `<button class="btn gray ${size} icon-only" data-action="preview" data-preview-key="${esc(trackId)}:${index}"
+                  data-src="${esc(c.preview_url)}" title="Play 30s sample"><i class="fa-solid fa-play"></i></button>`;
 }
 
 function confidenceBadge(score) {
@@ -549,234 +605,244 @@ function confidenceBadge(score) {
   return `<span class="confidence-badge ${cls}"><span class="confidence-pct">${pct}%</span><span class="confidence-label">match</span></span>`;
 }
 
-function renderEditForm(trackId, values) {
-  const v = values || {};
-  const note = v.autoSource === 'match'
-    ? `<div class="auto-note matched"><i class="fa-solid fa-star"></i> Auto-filled from a ${Math.round((v.confidence || 0) * 100)}%+ match</div>`
-    : (v.autoSource === 'youtube' ? `<div class="auto-note"><i class="fa-brands fa-youtube"></i> Auto-filled from YouTube (no confident match yet)</div>` : '');
+const FORM_FIELDS = [
+  {key: 'title', label: 'Title', wide: true},
+  {key: 'artist', label: 'Artist', wide: true},
+  {key: 'album', label: 'Album'},
+  {key: 'year', label: 'Year'},
+  {key: 'genre', label: 'Genre'},
+  {key: 'track_number', label: 'Track #'},
+];
+
+function formValues(src) {
+  const v = {};
+  FORM_FIELDS.forEach(f => { v[f.key] = src[f.key] ?? ''; });
+  v.art_url = src.art_url || '';
+  return v;
+}
+
+function renderEditForm(trackId, v) {
+  let note = '';
+  if (v.autoSource === 'match') {
+    note = `<div class="auto-note matched"><i class="fa-solid fa-star"></i> Auto-filled from a ${Math.round((v.confidence || 0) * 100)}% match</div>`;
+  } else if (v.autoSource === 'youtube') {
+    note = `<div class="auto-note"><i class="fa-brands fa-youtube"></i> Auto-filled from YouTube (no confident match yet)</div>`;
+  }
+  const id = esc(trackId);
   return `
     <div class="edit-form">
       <div class="art-block">
-        <img class="art-preview" id="art-preview-${trackId}" src="${v.art_url || ''}" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+        <img class="art-preview${v.art_url ? '' : ' hidden'}" id="art-preview-${id}" src="${esc(v.art_url)}" alt="">
         <label class="btn gray small art-upload-label">
           <i class="fa-solid fa-image"></i> Art
-          <input type="file" accept="image/*" style="display:none;" onchange="uploadArt('${trackId}', this)">
+          <input type="file" accept="image/*" style="display:none;" data-action="upload-art">
         </label>
       </div>
       <div class="fields-grid">
-        <div class="field-wrap span2">
-          <label>Title</label>
-          <input type="text" id="title-${trackId}" value="${escapeAttr(v.title)}" oninput="cacheField('${trackId}','title',this.value)">
-        </div>
-        <div class="field-wrap span2">
-          <label>Artist</label>
-          <input type="text" id="artist-${trackId}" value="${escapeAttr(v.artist)}" oninput="cacheField('${trackId}','artist',this.value)">
-        </div>
-        <div class="field-wrap">
-          <label>Album</label>
-          <input type="text" id="album-${trackId}" value="${escapeAttr(v.album)}" oninput="cacheField('${trackId}','album',this.value)">
-        </div>
-        <div class="field-wrap">
-          <label>Year</label>
-          <input type="text" id="year-${trackId}" value="${escapeAttr(v.year)}" oninput="cacheField('${trackId}','year',this.value)">
-        </div>
-        <div class="field-wrap">
-          <label>Genre</label>
-          <input type="text" id="genre-${trackId}" value="${escapeAttr(v.genre)}" oninput="cacheField('${trackId}','genre',this.value)">
-        </div>
-        <div class="field-wrap">
-          <label>Track #</label>
-          <input type="text" id="tracknum-${trackId}" value="${escapeAttr(v.track_number)}" oninput="cacheField('${trackId}','track_number',this.value)">
-        </div>
+        ${FORM_FIELDS.map(f => `
+          <div class="field-wrap${f.wide ? ' span2' : ''}">
+            <label for="${f.key}-${id}">${f.label}</label>
+            <input type="text" id="${f.key}-${id}" data-field="${f.key}" value="${esc(v[f.key])}">
+          </div>
+        `).join('')}
       </div>
     </div>
     ${note}
   `;
 }
 
-// ---------- Field / candidate interactions ----------
+// ---------- Actions ----------
 
-function cacheField(trackId, field, value) {
-  if (!formCache[trackId]) formCache[trackId] = {};
-  formCache[trackId][field] = value;
-  formCache[trackId].autoSource = null;
+async function addUrl() {
+  const url = urlInput.value.trim();
+  if (!url) return;
+  urlInput.value = '';
+  const data = await postJson('/add', {url});
+  if (data.error) {
+    alert(data.error);
+    urlInput.value = url;
+  }
+  await refreshQueue();
+  pollWhileActive();
 }
 
-let previewAudio = null;
-let previewButton = null;
-
-function togglePreview(url, btn, maxSeconds) {
-  // Clicking the currently-playing sample's button again stops it.
-  if (previewAudio && previewButton === btn) {
-    stopPreview();
-    return;
-  }
-  // Switching to a different sample: stop whatever was playing first.
-  if (previewAudio) {
-    stopPreview();
-  }
-  previewAudio = new Audio(url);
-  previewButton = btn;
-  btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
-  previewAudio.play().catch(() => stopPreview());
-  previewAudio.onended = stopPreview;
-  if (maxSeconds) {
-    // The Original card plays the full downloaded file rather than a
-    // pre-trimmed clip (there isn't one — we fingerprint the full file
-    // directly), so cut playback off at the same point fingerprinting did.
-    previewAudio.ontimeupdate = () => {
-      if (previewAudio && previewAudio.currentTime >= maxSeconds) {
-        stopPreview();
-      }
-    };
-  }
-}
-
-function stopPreview() {
-  if (previewAudio) {
-    previewAudio.pause();
-  }
-  resetPreviewButton(previewButton);
-  previewAudio = null;
-  previewButton = null;
-}
-
-function resetPreviewButton(btn) {
-  if (btn) btn.innerHTML = '<i class="fa-solid fa-play"></i>';
-}
-
-function applyCandidate(trackId, candidate) {
-  formCache[trackId] = {
-    title: candidate.title || '',
-    artist: candidate.artist || '',
-    album: candidate.album || '',
-    year: candidate.year || '',
-    genre: candidate.genre || '',
-    track_number: candidate.track_number || '',
-    art_url: candidate.art_url || '',
-    isCustomArt: false,
-    autoSource: null,
-  };
+function applyCandidate(trackId, which) {
+  const t = tracks.get(trackId);
+  if (!t) return;
+  const src = which === 'ref' ? (t.youtube_reference || {}) : (t.candidates || [])[Number(which)];
+  if (!src) return;
+  // Applying a candidate also switches back from any uploaded art to the
+  // candidate's own art.
+  formCache[trackId] = {...formValues(src), customArt: false, autoSource: null};
   const f = formCache[trackId];
-  setIfExists(`title-${trackId}`, f.title);
-  setIfExists(`artist-${trackId}`, f.artist);
-  setIfExists(`album-${trackId}`, f.album);
-  setIfExists(`year-${trackId}`, f.year);
-  setIfExists(`genre-${trackId}`, f.genre);
-  setIfExists(`tracknum-${trackId}`, f.track_number);
-  const preview = document.getElementById(`art-preview-${trackId}`);
-  if (preview) preview.src = f.art_url || '';
+  FORM_FIELDS.forEach(field => {
+    const el = document.getElementById(`${field.key}-${trackId}`);
+    if (el) el.value = f[field.key];
+  });
+  setArtPreview(trackId, f.art_url);
 }
 
-function setIfExists(id, value) {
-  const el = document.getElementById(id);
-  if (el) el.value = value;
+function setArtPreview(trackId, url) {
+  const img = document.getElementById(`art-preview-${trackId}`);
+  if (!img) return;
+  img.src = url || '';
+  img.classList.toggle('hidden', !url);
 }
 
 async function findMoreMatches(trackId, btn) {
-  const queryInput = document.getElementById(`query-${trackId}`);
-  const query = queryInput ? queryInput.value.trim() : '';
+  const query = (queryCache[trackId] || '').trim();
   btn.disabled = true;
-  const originalHtml = btn.innerHTML;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Searching';
-  try {
-    const resp = await fetch(`/track/${trackId}/more_matches`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query})
-    });
-    const data = await resp.json();
-    if (data.error) { alert(data.error); return; }
-    revealedMatches[trackId] = true;
-    if (latestTracks[trackId]) {
-      latestTracks[trackId].candidates = data.candidates;
-      const ref = latestTracks[trackId].youtube_reference || {};
-      const top = data.candidates[0] || null;
-      const rest = data.candidates.slice(1);
-      const container = document.getElementById(`matches-${trackId}`);
-      if (container) container.innerHTML = renderMatchesSection(trackId, ref, top, rest);
-    }
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = originalHtml;
-  }
-}
-
-async function uploadArt(trackId, input) {
-  if (!input.files.length) return;
-  const formData = new FormData();
-  formData.append('file', input.files[0]);
-  await fetch(`/track/${trackId}/upload_art`, {method: 'POST', body: formData});
-
-  if (!formCache[trackId]) formCache[trackId] = {};
-  formCache[trackId].isCustomArt = true;
-  formCache[trackId].autoSource = null;
-  const objectUrl = URL.createObjectURL(input.files[0]);
-  formCache[trackId].art_url = objectUrl;
-  const preview = document.getElementById(`art-preview-${trackId}`);
-  if (preview) preview.src = objectUrl;
-}
-
-async function confirmTrack(trackId) {
-  const selected = {
-    title: valOf(`title-${trackId}`),
-    artist: valOf(`artist-${trackId}`),
-    album: valOf(`album-${trackId}`),
-    year: valOf(`year-${trackId}`),
-    genre: valOf(`genre-${trackId}`),
-    track_number: valOf(`tracknum-${trackId}`) || null,
-    art_url: (formCache[trackId] && !formCache[trackId].isCustomArt) ? formCache[trackId].art_url : null,
-  };
-  const resp = await fetch(`/track/${trackId}/confirm`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({selected})
-  });
-  const data = await resp.json();
-  if (data.error) { alert(data.error); return; }
-  delete formCache[trackId];
-  delete revealedMatches[trackId];
+  const data = await postJson(`/track/${trackId}/more_matches`, {query});
+  if (data.error) alert(data.error);
+  else revealedMatches.add(trackId);
+  // The card is redrawn from the server's updated list (which re-creates
+  // the button in its normal state).
+  renderedVersion.delete(trackId);
   await refreshQueue();
 }
 
-function valOf(id) {
-  const el = document.getElementById(id);
-  return el ? el.value.trim() : '';
+async function uploadArt(trackId, input) {
+  const file = input.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('file', file);
+  const data = await api(`/track/${trackId}/upload_art`, {method: 'POST', body: formData});
+  if (data.error) { alert(data.error); return; }
+
+  const f = formCache[trackId] || (formCache[trackId] = {});
+  f.customArt = true;
+  f.autoSource = null;
+  f.art_url = URL.createObjectURL(file);
+  setArtPreview(trackId, f.art_url);
+}
+
+async function confirmTrack(trackId, btn) {
+  const f = formCache[trackId] || {};
+  const selected = {};
+  FORM_FIELDS.forEach(field => {
+    const el = document.getElementById(`${field.key}-${trackId}`);
+    selected[field.key] = el ? el.value.trim() : '';
+  });
+  selected.track_number = selected.track_number || null;
+  selected.art_url = f.customArt ? null : (f.art_url || null);
+
+  btn.disabled = true;
+  const data = await postJson(`/track/${trackId}/confirm`, {selected, use_custom_art: !!f.customArt});
+  if (data.error) {
+    alert(data.error);
+    btn.disabled = false;
+  }
+  await refreshQueue();
 }
 
 async function retryTrack(trackId) {
-  const resp = await fetch(`/track/${trackId}/retry`, {method: 'POST'});
-  const data = await resp.json();
+  const data = await postJson(`/track/${trackId}/retry`, {});
   if (data.error) alert(data.error);
   await refreshQueue();
   pollWhileActive();
 }
 
 async function removeTrack(trackId) {
-  if (!confirm('Remove this track? If it was already downloaded or tagged, that file will be deleted too.')) return;
-  await fetch(`/track/${trackId}`, {method: 'DELETE'});
-  delete formCache[trackId];
-  delete revealedMatches[trackId];
-  refreshQueue();
+  if (!confirm('Remove this track? Its downloaded audio will be deleted too.')) return;
+  const data = await api(`/track/${trackId}`, {method: 'DELETE'});
+  if (data.error) alert(data.error);
+  await refreshQueue();
 }
+
+// ---------- Audio preview ----------
+
+let preview = null;   // {audio, key, button}
+
+function togglePreview(btn) {
+  const key = btn.dataset.previewKey;
+  const wasThis = preview && preview.key === key;
+  if (preview) stopPreview();
+  if (wasThis) return;
+
+  const audio = new Audio(btn.dataset.src);
+  preview = {audio, key, button: btn};
+  btn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+  audio.play().catch(() => stopPreview());
+  audio.onended = stopPreview;
+  const maxSeconds = Number(btn.dataset.maxSeconds);
+  if (maxSeconds) {
+    // The sample is the whole downloaded file; stop where fingerprinting stopped.
+    audio.ontimeupdate = () => {
+      if (audio.currentTime >= maxSeconds) stopPreview();
+    };
+  }
+}
+
+function stopPreview() {
+  if (!preview) return;
+  preview.audio.pause();
+  if (preview.button) preview.button.innerHTML = '<i class="fa-solid fa-play"></i>';
+  preview = null;
+}
+
+// ---------- Event wiring ----------
+
+document.getElementById('add-button').addEventListener('click', addUrl);
+urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') addUrl(); });
+
+container.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el || el.disabled || el.dataset.action === 'upload-art') return;
+  const trackId = el.closest('.queue-card').dataset.trackId;
+  switch (el.dataset.action) {
+    case 'confirm': confirmTrack(trackId, el); break;
+    case 'retry':   retryTrack(trackId); break;
+    case 'remove':  removeTrack(trackId); break;
+    case 'more':    findMoreMatches(trackId, el); break;
+    case 'apply':   applyCandidate(trackId, el.dataset.candidate); break;
+    case 'preview': togglePreview(el); break;
+  }
+});
+
+container.addEventListener('input', e => {
+  const card = e.target.closest('.queue-card');
+  if (!card) return;
+  const trackId = card.dataset.trackId;
+  if (e.target.dataset.field) {
+    const f = formCache[trackId] || (formCache[trackId] = {});
+    f[e.target.dataset.field] = e.target.value;
+    f.autoSource = null;
+  } else if ('query' in e.target.dataset) {
+    queryCache[trackId] = e.target.value;
+  }
+});
+
+container.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && 'query' in e.target.dataset) {
+    const btn = e.target.closest('.queue-card').querySelector('[data-action="more"]');
+    if (btn && !btn.disabled) btn.click();
+  }
+});
+
+container.addEventListener('change', e => {
+  if (e.target.dataset.action === 'upload-art') {
+    uploadArt(e.target.closest('.queue-card').dataset.trackId, e.target);
+  }
+});
 
 // ---------- Utilities ----------
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str || '';
-  return div.innerHTML;
+function esc(val) {
+  if (val === null || val === undefined) return '';
+  return String(val)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function escapeAttr(val) {
-  if (val === null || val === undefined) return '';
-  return String(val).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+function cssEscape(s) {
+  return window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"');
 }
 
 // ---------- Init ----------
 
-refreshQueue().then(tracks => {
-  if (tracks.some(t => POLL_ACTIVE_STATUSES.includes(t.status))) {
-    pollWhileActive();
-  }
+refreshQueue().then(list => {
+  if (list.some(t => STATUS.in_progress.includes(t.status))) pollWhileActive();
 });
 </script>
 </body>

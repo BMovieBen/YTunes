@@ -14,12 +14,12 @@ tool, not intended for redistribution.
 
 1. Paste a YouTube video or playlist URL into the web UI. Playlists are expanded into
    individual queue entries automatically.
-2. Click **Process Queue**. For each track, YTunes:
+2. Processing starts automatically. For each track, YTunes:
    - Downloads the audio via `yt-dlp`
-   - Extracts a short clip and fingerprints it with **Chromaprint**, identified against
+   - Fingerprints the first minute with **Chromaprint** and identifies it against
      the free **AcoustID** database
-   - Searches **iTunes → MusicBrainz → Discogs** (in that order) for metadata matches
-     based on the fingerprint result (falling back to the raw YouTube title if
+   - Searches **iTunes, MusicBrainz and Discogs** (in parallel, listed in your configured
+     order) for metadata matches based on the fingerprint result (falling back to the raw YouTube title if
      fingerprinting comes up empty)
 3. Every track goes to **Needs Review** — you confirm the correct match, or type in
    exact metadata yourself if nothing matches.
@@ -64,19 +64,24 @@ pip install -r requirements.txt
 
 Copy `config.sample.json` to `config.json` and fill in your values:
 
+Missing keys fall back to the defaults shown.
+
 | Key                       | Description                                                                 |
-| ------------------------- | ----------------------------------------------------------------------------- |
+| ------------------------- | --------------------------------------------------------------------------- |
 | `web_port`                | Port the web interface runs on. Default `8090`.                             |
-| `log_level`                | Logging verbosity: `verbose`, `on_error`, or `off`.                        |
+| `bind_host`               | Address to listen on. Default `127.0.0.1` (this PC only). Use `0.0.0.0` to allow other devices on your network (there's no login). |
+| `log_level`               | Logging verbosity: `verbose`, `on_error`, or `off`. The log rotates at 2 MB. |
 | `output_folder`           | Where finished, tagged MP3s land (flat folder).                             |
-| `temp_folder`             | Working folder for downloads and clips, cleared as tracks complete.         |
-| `default_art`             | Fallback album art image used if no match is found and nothing is uploaded. |
+| `temp_folder`             | Working folder for downloads, cleared as tracks are confirmed or removed.   |
+| `db_path`                 | The track list database. Default `log/ytunes.db`.                           |
+| `default_art`             | Fallback album art if no match is found and nothing is uploaded. Relative paths are inside the YTunes folder. |
 | `ytdlp_path` / `ffmpeg_path` / `fpcalc_path` | Paths to each binary, if not on PATH.                    |
-| `clip_offset_seconds`     | Where in the track to start the fingerprinting clip (skips intros).         |
-| `clip_duration_seconds`   | Length of the fingerprinting clip.                                          |
-| `acoustid_api_key`        | Your free AcoustID API key.                                                  |
+| `cookies_from_browser`    | Browser to borrow YouTube cookies from (e.g. `chrome` or `edge`), if YouTube blocks anonymous downloads. |
+| `fingerprint_max_seconds` | How much of each track is decoded for fingerprinting. Default `60`.         |
+| `acoustid_api_key`        | Your free AcoustID API key.                                                 |
 | `discogs_token`           | Your Discogs personal access token (optional).                              |
-| `metadata_source_order`   | Priority order for metadata search: `["itunes", "musicbrainz", "discogs"]`. |
+| `metadata_source_order`   | Order results are listed in: `["itunes", "musicbrainz", "discogs"]`. Leave a source out to skip it. |
+| `auto_match_confidence_threshold` | Matches scoring at least this (0–1) pre-fill the review form. Default `0.9`. |
 | `user_agent`              | User agent string sent to metadata APIs (MusicBrainz requires a real one).  |
 
 ### 4. Add a default art image (optional)
@@ -88,20 +93,20 @@ when no album art is found and none is uploaded.
 
 ## Usage
 
-Double-click `ytunes.bat` or run:
+Double-click `ytunes.bat`. On first run it creates the virtual environment (and it
+reinstalls dependencies whenever `requirements.txt` changes). It then starts the app and
+opens `http://localhost:8090` (or your configured port). `ytunes-no-browser.bat` does the
+same without opening a browser tab.
 
-```
-python C:\YTunes\scripts\app.py
-```
-
-Open `http://localhost:8090` (or your configured port).
-
-1. Paste a YouTube URL (video or playlist) and click **+ Add**.
-2. Click **Process Queue** to download, fingerprint, and search for each queued track.
-3. Once a track reaches **Needs Review**, pick the correct candidate from the list, or
-   fill in the manual entry fields yourself.
-4. Optionally upload custom album art before confirming.
-5. Confirmed tracks appear in the **Library** section, ready to download or delete.
+1. Paste a YouTube URL (video or playlist) and click **+**. A playlist becomes one card
+   per video; videos already in the list are skipped.
+2. Each track is downloaded, fingerprinted and looked up automatically.
+3. Once a track reaches **Needs Review**, apply the best match, click **Find more** for
+   more candidates, or type the metadata yourself.
+4. Optionally upload custom album art before confirming. Applying a candidate afterwards
+   switches back to that candidate's art.
+5. **Confirm & Tag** writes the tags, moves the MP3 to your output folder and removes the
+   card. If tagging fails, the card stays in review with the error shown.
 
 ---
 
@@ -109,15 +114,17 @@ Open `http://localhost:8090` (or your configured port).
 
 ```
 C:\YTunes
-  ytunes.bat              ← launcher
+  ytunes.bat              ← launcher (ytunes-no-browser.bat: same, no browser tab)
   config.json              ← your configuration (not in repo)
   config.sample.json       ← configuration template
   default_art.jpg          ← fallback album art (optional, not in repo)
   requirements.txt
+  requirements-dev.txt     ← test dependencies
   scripts/
-    app.py                 ← Flask routes
-    pipeline.py            ← download/fingerprint/lookup orchestration
-    queue_manager.py        ← queue load/save/cleanup
+    app.py                 ← Flask routes and startup
+    pipeline.py            ← background worker: download/fingerprint/lookup, confirm
+    store.py               ← SQLite track list
+    statuses.py            ← track statuses and allowed status changes
     fetch_youtube.py        ← YouTube video + playlist downloader
     fingerprint.py           ← Chromaprint/AcoustID clip identification
     metadata_lookup.py       ← iTunes/MusicBrainz/Discogs search
@@ -125,12 +132,28 @@ C:\YTunes
     utils.py                 ← shared utilities
   templates/
     index.html              ← web interface
+  tests/                    ← pytest suite
   output/                   ← finished, tagged MP3s (flat folder)
   temp/                     ← working files, cleared as tracks complete
   log/
     ytunes.log
-    queue.json
+    ytunes.db
 ```
+
+Older versions kept the list in `log/queue.json`. On first start it's imported into the
+database and renamed to `queue.json.imported`.
+
+---
+
+## Running the tests
+
+```
+venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+venv\Scripts\python.exe -m pytest
+```
+
+The tests use a temporary config, database and folders. They never touch your real
+output folder or the network.
 
 ---
 
@@ -149,7 +172,10 @@ nothing, use the manual entry fields.
 Set a real, identifying `user_agent` in `config.json` — MusicBrainz requires this.
 
 **YouTube playlist doesn't expand into individual tracks**
-Confirm `yt-dlp` is up to date: `yt-dlp -U`.
+Confirm `yt-dlp` is up to date: `venv\Scripts\python.exe -m pip install -U yt-dlp`.
+
+**Can't open YTunes from another device**
+By default it only listens on this PC. Set `"bind_host": "0.0.0.0"` in `config.json`.
 
 ---
 

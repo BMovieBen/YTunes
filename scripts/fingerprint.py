@@ -23,7 +23,7 @@ import os
 
 import requests
 
-from utils import load_config, log
+from utils import BASE_DIR, load_config, log
 
 try:
     import acoustid
@@ -53,7 +53,7 @@ def identify(audio_path, maxlength=60):
     cfg = load_config()
     api_key = cfg.get("acoustid_api_key", "")
 
-    if not api_key or api_key == "YOUR_ACOUSTID_API_KEY":
+    if not api_key:
         log("No AcoustID API key configured; skipping fingerprint identification", "error")
         return []
 
@@ -65,7 +65,7 @@ def identify(audio_path, maxlength=60):
         log(f"Audio file not found for fingerprinting: {audio_path}", "error")
         return []
 
-    os.environ.setdefault("FPCALC", cfg.get("fpcalc_path", "fpcalc"))
+    os.environ["FPCALC"] = _fpcalc_path(cfg)
 
     try:
         duration, fingerprint_data = acoustid.fingerprint_file(audio_path, maxlength=maxlength)
@@ -145,3 +145,14 @@ def identify(audio_path, maxlength=60):
             best[key] = r
 
     return sorted(best.values(), key=lambda r: r["score"], reverse=True)
+
+
+def _fpcalc_path(cfg):
+    """fpcalc_path as configured, but a bare filename that exists in the
+    YTunes folder (e.g. a bundled fpcalc.exe) is used from there, so it
+    works no matter what the current directory is."""
+    path = cfg.get("fpcalc_path") or "fpcalc"
+    local = os.path.join(BASE_DIR, path)
+    if not os.path.isabs(path) and os.path.exists(local):
+        return local
+    return path

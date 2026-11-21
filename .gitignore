@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 venv/
 fpcalc.exe
+ytunes.db
+*.imported
+.pytest_cache/

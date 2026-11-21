@@ -1,6 +1,6 @@
 """
 tag_mp3.py - Embed ID3 metadata + album art into the downloaded MP3 and move
-it into the flat output folder. Mirrors Article2Pod's tag-mp3.py.
+it into the flat output folder.
 """
 
 import io
@@ -40,6 +40,12 @@ def _crop_to_square(image_bytes):
         return image_bytes
 
 
+def _image_mime(data):
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    return "image/jpeg"
+
+
 def tag_and_move(track):
     """
     track is a queue dict with 'audio_path', 'selected' (final metadata),
@@ -62,11 +68,9 @@ def tag_and_move(track):
         if download_art(meta["art_url"], temp_art_path):
             with open(temp_art_path, "rb") as f:
                 art_bytes = f.read()
-    if art_bytes is None:
-        default_art = os.path.join(os.path.dirname(cfg["output_folder"]), cfg.get("default_art", "default_art.jpg"))
-        if os.path.exists(default_art):
-            with open(default_art, "rb") as f:
-                art_bytes = f.read()
+    if art_bytes is None and cfg.get("default_art") and os.path.exists(cfg["default_art"]):
+        with open(cfg["default_art"], "rb") as f:
+            art_bytes = f.read()
 
     if art_bytes:
         art_bytes = _crop_to_square(art_bytes)
@@ -102,7 +106,7 @@ def tag_and_move(track):
         tags.add(TRCK(encoding=3, text=str(track_number)))
     if art_bytes:
         tags.delall("APIC")
-        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=art_bytes))
+        tags.add(APIC(encoding=3, mime=_image_mime(art_bytes), type=3, desc="Cover", data=art_bytes))
 
     tags.save(audio_path, v2_version=3)
 

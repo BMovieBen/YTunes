@@ -1,4 +1,7 @@
 @echo off
+rem YTunes launcher. Options are passed through to app.py, e.g.:
+rem   ytunes.bat --no-browser
+
 if not defined IS_MINIMIZED (
     set IS_MINIMIZED=1
     start "" /min "%~dpnx0" %*
@@ -10,16 +13,16 @@ cd /d "%~dp0"
 if not exist "venv\Scripts\python.exe" (
     echo Creating virtual environment...
     python -m venv venv
-    call venv\Scripts\activate.bat
-    echo Installing dependencies...
-    pip install -r requirements.txt
-) else (
-    call venv\Scripts\activate.bat
 )
 
-for /f "delims=" %%P in ('venv\Scripts\python.exe -c "import json;print(json.load(open('config.json')).get('web_port',8090))"') do set WEB_PORT=%%P
-if not defined WEB_PORT set WEB_PORT=8090
+rem (Re)install dependencies when requirements.txt has changed since the last install.
+fc /b requirements.txt venv\requirements.installed >nul 2>&1
+if errorlevel 1 (
+    echo Installing dependencies...
+    venv\Scripts\python.exe -m pip install -r requirements.txt && copy /y requirements.txt venv\requirements.installed >nul
+)
 
-start "" /min cmd /c "timeout /t 3 /nobreak >nul & start "" http://localhost:%WEB_PORT%"
+rem Put the venv's yt-dlp on PATH.
+set "PATH=%~dp0venv\Scripts;%PATH%"
 
-venv\Scripts\python.exe scripts\app.py
+venv\Scripts\python.exe scripts\app.py %*
