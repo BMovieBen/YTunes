@@ -205,6 +205,32 @@ def youtube_video_id(url):
     return None
 
 
+# Thumbnail hosts: https://i.ytimg.com/vi/<id>/hq720.jpg (also vi_webp, img.youtube.com)
+_THUMBNAIL_URL = re.compile(
+    r"^https?://(?:i\d?\.ytimg\.com|img\.youtube\.com)/vi(?:_webp)?/([A-Za-z0-9_-]{11})/", re.I
+)
+_IMAGE_EXTENSIONS = re.compile(r"\.(?:jpe?g|png|webp|gif|bmp|avif)$", re.I)
+
+
+class InvalidUrl(ValueError):
+    """The pasted link can't be a video."""
+
+
+def clean_video_url(url):
+    """Tidy a pasted link before it's queued. A YouTube thumbnail link (what
+    "Copy image address" gives you) becomes its video's watch URL. Any other
+    image link is rejected, since yt-dlp would "download" the picture and
+    then fail to find audio in it."""
+    url = (url or "").strip()
+    m = _THUMBNAIL_URL.match(url)
+    if m:
+        return f"https://www.youtube.com/watch?v={m.group(1)}"
+    path = re.split(r"[?#]", url, maxsplit=1)[0]
+    if _IMAGE_EXTENSIONS.search(path):
+        raise InvalidUrl("That's a link to an image, not a video. Copy the video's link instead.")
+    return url
+
+
 def new_track_id():
     """Generate a short unique ID for a queue track."""
     return uuid.uuid4().hex[:12]

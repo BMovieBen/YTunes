@@ -27,7 +27,7 @@ import metadata_lookup
 import statuses as st
 import store
 import tag_mp3
-from utils import load_config, log, normalize_text, youtube_video_id
+from utils import clean_video_url, load_config, log, normalize_text, youtube_video_id
 
 
 class DuplicateTrack(ValueError):
@@ -102,7 +102,9 @@ def _fail(track_id, message):
 def add_url(url):
     """Add a placeholder card right away (its title is just the URL until
     the worker resolves it), then make sure the worker is running.
-    Raises DuplicateTrack if it's a single video that's already on a card."""
+    Raises InvalidUrl for an image link, DuplicateTrack if it's a single
+    video that's already on a card."""
+    url = clean_video_url(url)
     video_id = youtube_video_id(url)
     if video_id and "list=" not in url and store.existing_video_ids([video_id]):
         raise DuplicateTrack("That video is already in the list")

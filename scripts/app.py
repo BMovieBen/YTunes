@@ -17,7 +17,7 @@ from werkzeug.utils import secure_filename
 import pipeline
 import statuses as st
 import store
-from utils import BASE_DIR, load_config, log
+from utils import BASE_DIR, InvalidUrl, load_config, log
 
 ALLOWED_ART_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -50,6 +50,8 @@ def create_app(start_worker=True):
             return jsonify({"error": "No URL provided"}), 400
         try:
             added = pipeline.add_url(url)
+        except InvalidUrl as e:
+            return jsonify({"error": str(e)}), 400
         except pipeline.DuplicateTrack as e:
             return jsonify({"error": str(e)}), 409
         return jsonify({"added": added})

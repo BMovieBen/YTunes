@@ -92,3 +92,10 @@ def test_tag_and_move_writes_tags_and_default_art(cfg, tmp_path):
     assert str(tags["TRCK"]) == "3"
     art = Image.open(io.BytesIO(tags.getall("APIC")[0].data))
     assert art.size[0] == art.size[1] == 90
+
+
+def test_add_thumbnail_link_queues_the_video(client, store):
+    r = client.post("/add", json={"url": "https://i.ytimg.com/vi/abcDEF12345/hq720.jpg?sqp=x"})
+    assert r.status_code == 200
+    assert store.list_tracks()[0]["source_url"] == "https://www.youtube.com/watch?v=abcDEF12345"
+    assert client.post("/add", json={"url": "https://example.com/a.png"}).status_code == 400

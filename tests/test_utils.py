@@ -1,6 +1,6 @@
 import pytest
 
-from utils import normalize_text, safe_filename, youtube_video_id
+from utils import InvalidUrl, clean_video_url, normalize_text, safe_filename, youtube_video_id
 
 
 @pytest.mark.parametrize("name, expected", [
@@ -38,3 +38,19 @@ def test_normalize_text_strips_annotations_and_punctuation():
 ])
 def test_youtube_video_id(url, vid):
     assert youtube_video_id(url) == vid
+
+
+@pytest.mark.parametrize("pasted, cleaned", [
+    ("https://i.ytimg.com/vi/abcDEF12345/hq720.jpg?sqp=xyz&rs=abc", "https://www.youtube.com/watch?v=abcDEF12345"),
+    ("https://i9.ytimg.com/vi_webp/abcDEF12345/maxresdefault.webp", "https://www.youtube.com/watch?v=abcDEF12345"),
+    ("https://img.youtube.com/vi/abcDEF12345/0.jpg", "https://www.youtube.com/watch?v=abcDEF12345"),
+    ("  https://youtu.be/abcDEF12345  ", "https://youtu.be/abcDEF12345"),
+    ("https://www.youtube.com/playlist?list=PLabc", "https://www.youtube.com/playlist?list=PLabc"),
+])
+def test_clean_video_url(pasted, cleaned):
+    assert clean_video_url(pasted) == cleaned
+
+
+def test_clean_video_url_rejects_other_images():
+    with pytest.raises(InvalidUrl):
+        clean_video_url("https://example.com/cover.JPG?size=large")
